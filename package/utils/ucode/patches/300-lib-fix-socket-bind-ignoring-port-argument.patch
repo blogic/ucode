@@ -1,0 +1,58 @@
+From df2b2c7afefb459bc1b78ebbfff02d42c4137a8d Mon Sep 17 00:00:00 2001
+From: John Crispin <john@phrozen.org>
+Date: Fri, 10 Apr 2026 18:34:58 +0200
+Subject: [PATCH] lib: fix socket bind() ignoring port argument
+
+uc_socket_inst_bind() only extracted the address argument via args_get,
+silently discarding the optional port parameter. When calling
+s.bind('0.0.0.0', 44444), uv_to_sockaddr() parsed the address string
+but found no embedded port, leaving sin_port at zero. The kernel then
+assigned an ephemeral port instead of the requested one.
+
+Add the same port argument extraction and application that
+uc_socket_inst_connect() already implements.
+
+Signed-off-by: John Crispin <john@phrozen.org>
+---
+ lib/socket.c | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+--- a/lib/socket.c
++++ b/lib/socket.c
+@@ -4403,17 +4403,34 @@ static uc_value_t *
+ uc_socket_inst_bind(uc_vm_t *vm, size_t nargs)
+ {
+ 	struct sockaddr_storage ss = { 0 };
+-	uc_value_t *addr;
++	uc_value_t *addr, *port;
++	unsigned long n;
+ 	socklen_t slen;
+ 	int sockfd;
+ 
+ 	args_get(vm, nargs, &sockfd,
+-		"address", UC_NULL, true, &addr);
++		"address", UC_NULL, true, &addr,
++		"port", UC_INTEGER, true, &port);
+ 
+ 	if (addr) {
+ 		if (!uv_to_sockaddr(addr, &ss, &slen))
+ 			return NULL;
+ 
++		if (port) {
++			if (ss.ss_family != AF_INET && ss.ss_family != AF_INET6)
++				err_return(EINVAL, "Port argument is only valid for IPv4 and IPv6 addresses");
++
++			n = ucv_to_unsigned(port);
++
++			if (n > 65535)
++				errno = ERANGE;
++
++			if (errno != 0)
++				err_return(errno, "Invalid port number");
++
++			((struct sockaddr_in6 *)&ss)->sin6_port = htons(n);
++		}
++
+ 		if (bind(sockfd, (struct sockaddr *)&ss, slen) == -1)
+ 			err_return(errno, "bind()");
+ 	}
