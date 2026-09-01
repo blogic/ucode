@@ -4058,6 +4058,7 @@ uc_socket_inst_sendmsg(uc_vm_t *vm, size_t nargs)
 	strbuf_array_t sbarr = { 0 };
 	struct msghdr msg = { 0 };
 	struct iovec vec = { 0 };
+	bool ctl_allocated = false;
 	int flagval, sockfd;
 	socklen_t slen;
 	ssize_t ret;
@@ -4088,6 +4089,7 @@ uc_socket_inst_sendmsg(uc_vm_t *vm, size_t nargs)
 
 		if (msg.msg_controllen > 0) {
 			msg.msg_control = xalloc(msg.msg_controllen);
+			ctl_allocated = true;
 
 			struct cmsghdr *cmsg = NULL;
 
@@ -4178,7 +4180,8 @@ uc_socket_inst_sendmsg(uc_vm_t *vm, size_t nargs)
 	if (msg.msg_iov != &vec)
 		free(msg.msg_iov);
 
-	free(msg.msg_control);
+	if (ctl_allocated)
+		free(msg.msg_control);
 
 	if (ret == -1)
 		err_return(errno, "sendmsg()");
