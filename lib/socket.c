@@ -4108,7 +4108,7 @@ uc_socket_inst_sendmsg(uc_vm_t *vm, size_t nargs)
 			}
 
 			msg.msg_controllen = (cmsg != NULL)
-				? (char *)cmsg - (char *)msg.msg_control + CMSG_SPACE(cmsg->cmsg_len)
+				? (char *)cmsg - (char *)msg.msg_control + CMSG_ALIGN(cmsg->cmsg_len)
 				: 0;
 		}
 	}
