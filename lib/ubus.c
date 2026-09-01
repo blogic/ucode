@@ -551,6 +551,7 @@ typedef struct {
 	struct blob_buf buf;
 	int timeout;
 	bool fd_handle;
+	bool self_ref;
 
 	uc_vm_t *vm;
 	uc_value_t *res;
@@ -714,12 +715,9 @@ enum {
 };
 
 static void
-uc_ubus_put_res(uc_value_t **rp)
+uc_ubus_clear_res(uc_value_t *res)
 {
-	uc_value_t *res = *rp;
 	size_t i;
-
-	*rp = NULL;
 
 	if (!res)
 		return;
@@ -735,6 +733,19 @@ uc_ubus_put_res(uc_value_t **rp)
 	ucv_resource_proto_set(res, NULL);
 
 	ucv_resource_persistent_set(res, false);
+}
+
+static void
+uc_ubus_put_res(uc_value_t **rp)
+{
+	uc_value_t *res = *rp;
+
+	*rp = NULL;
+
+	if (!res)
+		return;
+
+	uc_ubus_clear_res(res);
 	ucv_put(res);
 }
 
@@ -993,7 +1004,7 @@ uc_ubus_connect(uc_vm_t *vm, size_t nargs)
 
 	ubus_add_uloop(&c->ctx);
 
-	ok_return(ucv_get(c->res));
+	ok_return(c->res);
 }
 
 static void
@@ -1043,7 +1054,7 @@ _conn_get(uc_vm_t *vm, uc_ubus_connection_t **conn)
 
 		ubus_add_uloop(&c->ctx);
 
-		uc_vm_registry_set(vm, "ubus.connection", ucv_get(c->res));
+		uc_vm_registry_set(vm, "ubus.connection", c->res);
 	}
 	else {
 		c = uc_fn_thisval("ubus.connection");
@@ -3562,7 +3573,14 @@ uc_ubus_disconnect(uc_vm_t *vm, size_t nargs)
 	}
 	ubus_shutdown(&c->ctx);
 	c->ctx.sock.fd = -1;
-	uc_ubus_put_res(&c->res);
+
+	if (c->self_ref) {
+		c->self_ref = false;
+		uc_ubus_put_res(&c->res);
+	}
+	else {
+		uc_ubus_clear_res(c->res);
+	}
 
 	ok_return(ucv_boolean_new(true));
 }
@@ -3717,7 +3735,11 @@ uc_ubus_channel_disconnect_cb(struct ubus_context *ctx)
 		c->ctx.sock.fd = -1;
 	}
 
-	uc_ubus_put_res(&c->res);
+	if (c->self_ref) {
+		c->self_ref = false;
+		uc_ubus_put_res(&c->res);
+	}
+
 	ucv_put(res);
 }
 
@@ -3725,6 +3747,7 @@ static uc_value_t *
 uc_ubus_channel_add(uc_ubus_connection_t *c, uc_value_t *cb,
                     uc_value_t *disconnect_cb, uc_value_t *fd)
 {
+	c->self_ref = true;
 	ucv_resource_persistent_set(c->res, true);
 	ucv_resource_value_set(c->res, CONN_RES_FD, ucv_get(fd));
 	ucv_resource_value_set(c->res, CONN_RES_CB, ucv_get(cb));
