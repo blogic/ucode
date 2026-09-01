@@ -553,6 +553,9 @@ uc_vm_stack_pop(uc_vm_t *vm)
 uc_value_t *
 uc_vm_stack_peek(uc_vm_t *vm, size_t offset)
 {
+	if (offset >= vm->stack.count)
+		return NULL;
+
 	return vm->stack.entries[vm->stack.count + (-1 - offset)];
 }
 
@@ -1281,7 +1284,15 @@ static void
 uc_vm_insn_load_upval(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	uc_callframe_t *frame = uc_vm_current_frame(vm);
-	uc_upvalref_t *ref = frame->closure->upvals[vm->arg.u32];
+	uc_upvalref_t *ref;
+
+	if (vm->arg.u32 >= frame->closure->function->nupvals) {
+		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME, "upvalue index out of range");
+
+		return;
+	}
+
+	ref = frame->closure->upvals[vm->arg.u32];
 
 	if (ref->closed)
 		uc_vm_stack_push(vm, ucv_get(ref->value));
@@ -1293,6 +1304,12 @@ static void
 uc_vm_insn_load_local(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	uc_callframe_t *frame = uc_vm_current_frame(vm);
+
+	if (frame->stackframe + vm->arg.u32 >= vm->stack.count) {
+		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME, "local slot out of range");
+
+		return;
+	}
 
 	uc_vm_stack_push(vm, ucv_get(vm->stack.entries[frame->stackframe + vm->arg.u32]));
 }
@@ -1487,8 +1504,17 @@ static void
 uc_vm_insn_store_upval(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	uc_callframe_t *frame = uc_vm_current_frame(vm);
-	uc_upvalref_t *ref = frame->closure->upvals[vm->arg.u32];
-	uc_value_t *val = ucv_get(uc_vm_stack_peek(vm, 0));
+	uc_upvalref_t *ref;
+	uc_value_t *val;
+
+	if (vm->arg.u32 >= frame->closure->function->nupvals) {
+		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME, "upvalue index out of range");
+
+		return;
+	}
+
+	ref = frame->closure->upvals[vm->arg.u32];
+	val = ucv_get(uc_vm_stack_peek(vm, 0));
 
 	if (ref->closed) {
 		ucv_put(ref->value);
@@ -1503,7 +1529,15 @@ static void
 uc_vm_insn_store_local(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	uc_callframe_t *frame = uc_vm_current_frame(vm);
-	uc_value_t *val = ucv_get(uc_vm_stack_peek(vm, 0));
+	uc_value_t *val;
+
+	if (frame->stackframe + vm->arg.u32 >= vm->stack.count) {
+		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME, "local slot out of range");
+
+		return;
+	}
+
+	val = ucv_get(uc_vm_stack_peek(vm, 0));
 
 	uc_vm_stack_set(vm, frame->stackframe + vm->arg.u32, val);
 }
@@ -1976,9 +2010,18 @@ uc_vm_insn_update_upval(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	uc_callframe_t *frame = uc_vm_current_frame(vm);
 	size_t slot = vm->arg.u32 & 0x00FFFFFF;
-	uc_upvalref_t *ref = frame->closure->upvals[slot];
-	uc_value_t *inc = uc_vm_stack_pop(vm);
+	uc_upvalref_t *ref;
+	uc_value_t *inc;
 	uc_value_t *val;
+
+	if (slot >= frame->closure->function->nupvals) {
+		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME, "upvalue index out of range");
+
+		return;
+	}
+
+	ref = frame->closure->upvals[slot];
+	inc = uc_vm_stack_pop(vm);
 
 	if (ref->closed)
 		val = ref->value;
@@ -2005,8 +2048,16 @@ uc_vm_insn_update_local(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	uc_callframe_t *frame = uc_vm_current_frame(vm);
 	size_t slot = vm->arg.u32 & 0x00FFFFFF;
-	uc_value_t *inc = uc_vm_stack_pop(vm);
+	uc_value_t *inc;
 	uc_value_t *val;
+
+	if (frame->stackframe + slot >= vm->stack.count) {
+		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME, "local slot out of range");
+
+		return;
+	}
+
+	inc = uc_vm_stack_pop(vm);
 
 	val = uc_vm_value_arith(vm, vm->arg.u32 >> 24,
 	                        vm->stack.entries[frame->stackframe + slot], inc);
