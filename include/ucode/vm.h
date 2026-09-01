@@ -117,7 +117,8 @@ typedef enum {
 } uc_vm_status_t;
 
 typedef enum {
-	GC_ENABLED = (1 << 0)
+	GC_ENABLED = (1 << 0),
+	GC_SERIALISING = (1 << 1)
 } uc_vm_gc_flags_t;
 
 #define GC_DEFAULT_INTERVAL 1000
