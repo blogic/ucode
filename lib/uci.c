@@ -1944,13 +1944,14 @@ uc_uci_foreach(uc_vm_t *vm, size_t nargs)
 	uc_value_t *conf = uc_fn_arg(0);
 	uc_value_t *type = uc_fn_arg(1);
 	uc_value_t *func = uc_fn_arg(2);
-	uc_value_t *rv = NULL;
+	uc_value_t *rv = NULL, *sections;
 	struct uci_package *p = NULL;
-	struct uci_element *e, *tmp;
 	struct uci_section *sc;
 	uc_exception_type_t ex;
+	struct uci_element *e;
 	bool stop = false;
 	bool ret = false;
+	size_t n, j;
 	int i = 0;
 
 	if (ucv_type(conf) != UC_STRING ||
@@ -1968,15 +1969,23 @@ uc_uci_foreach(uc_vm_t *vm, size_t nargs)
 	if (!p && uci_load(*c, ucv_string_get(conf), &p))
 		err_return((*c)->err);
 
-	uci_foreach_element_safe(&p->sections, tmp, e) {
+	sections = ucv_array_new(vm);
+
+	uci_foreach_element(&p->sections, e) {
 		sc = uci_to_section(e);
 		i++;
 
 		if (type && strcmp(sc->type, ucv_string_get(type)))
 			continue;
 
+		ucv_array_push(sections, section_to_uval(vm, sc, i - 1));
+	}
+
+	n = ucv_array_length(sections);
+
+	for (j = 0; j < n; j++) {
 		uc_vm_stack_push(vm, ucv_get(func));
-		uc_vm_stack_push(vm, section_to_uval(vm, sc, i - 1));
+		uc_vm_stack_push(vm, ucv_get(ucv_array_get(sections, j)));
 
 		ex = uc_vm_call(vm, false, 1);
 
@@ -1993,6 +2002,8 @@ uc_uci_foreach(uc_vm_t *vm, size_t nargs)
 		if (stop)
 			break;
 	}
+
+	ucv_put(sections);
 
 	ok_return(ucv_boolean_new(ret));
 }
