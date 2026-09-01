@@ -4214,9 +4214,10 @@ uc_system(uc_vm_t *vm, size_t nargs)
 	uc_value_t *timeout = uc_fn_arg(1);
 	const char **arglist, *fn;
 	sigset_t sigmask, sigomask;
-	struct timespec ts;
+	struct timespec ts, now;
+	int64_t tms, deadline, left;
+	bool reaped = false;
 	size_t i, len;
-	int64_t tms;
 	pid_t cld;
 	int rc;
 
@@ -4291,10 +4292,21 @@ uc_system(uc_vm_t *vm, size_t nargs)
 
 	default:
 		if (tms > 0) {
-			ts.tv_sec = tms / 1000;
-			ts.tv_nsec = (tms % 1000) * 1000000;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			deadline = now.tv_sec * 1000 + now.tv_nsec / 1000000 + tms;
 
 			while (1) {
+				clock_gettime(CLOCK_MONOTONIC, &now);
+				left = deadline - (now.tv_sec * 1000 + now.tv_nsec / 1000000);
+
+				if (left <= 0) {
+					kill(cld, SIGKILL);
+					break;
+				}
+
+				ts.tv_sec = left / 1000;
+				ts.tv_nsec = (left % 1000) * 1000000;
+
 				if (sigtimedwait(&sigmask, NULL, &ts) < 0) {
 					if (errno == EINTR)
 						continue;
@@ -4305,13 +4317,17 @@ uc_system(uc_vm_t *vm, size_t nargs)
 					}
 
 					kill(cld, SIGKILL);
+					break;
 				}
 
-				break;
+				if (waitpid(cld, &rc, WNOHANG) == cld) {
+					reaped = true;
+					break;
+				}
 			}
 		}
 
-		while (waitpid(cld, &rc, 0) < 0) {
+		while (!reaped && waitpid(cld, &rc, 0) < 0) {
 			if (errno == EINTR)
 				continue;
 
