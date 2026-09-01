@@ -1919,6 +1919,7 @@ void
 ucv_to_stringbuf_formatted(uc_vm_t *vm, uc_stringbuf_t *pb, uc_value_t *uv, size_t depth, char pad_char, size_t pad_size)
 {
 	bool json = (pad_char != '\0');
+	bool outer = false;
 	uc_resource_type_t *restype;
 	uc_cfunction_t *cfunction;
 	uc_function_t *function;
@@ -1931,14 +1932,19 @@ ucv_to_stringbuf_formatted(uc_vm_t *vm, uc_stringbuf_t *pb, uc_value_t *uv, size
 	double d;
 	char *s;
 
+	if (vm != NULL && !(vm->gc_flags & UC_GC_SERIALISING)) {
+		vm->gc_flags |= UC_GC_SERIALISING;
+		outer = true;
+	}
+
 	if (ucv_is_marked(uv)) {
 		ucv_stringbuf_append(pb, "null");
 
-		return;
+		goto out;
 	}
 
 	if (vm != NULL && ucv_call_tostring(vm, pb, uv, json))
-		return;
+		goto out;
 
 	ucv_set_mark(uv);
 
@@ -2154,6 +2160,10 @@ ucv_to_stringbuf_formatted(uc_vm_t *vm, uc_stringbuf_t *pb, uc_value_t *uv, size
 	}
 
 	ucv_clear_mark(uv);
+
+out:
+	if (outer)
+		vm->gc_flags &= ~UC_GC_SERIALISING;
 }
 
 static char *
@@ -3064,6 +3074,9 @@ ucv_gc_common(uc_vm_t *vm, bool final)
 void
 ucv_gc(uc_vm_t *vm)
 {
+	if (vm->gc_flags & UC_GC_SERIALISING)
+		return;
+
 	ucv_gc_common(vm, false);
 }
 
