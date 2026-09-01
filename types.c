@@ -1915,6 +1915,51 @@ ucv_to_stringbuf_add_double(uc_stringbuf_t *pb, double val, bool json)
 	ucv_stringbuf_append(pb, ".0");
 }
 
+static void
+ucv_object_to_stringbuf(uc_vm_t *vm, uc_stringbuf_t *pb, uc_value_t *uv,
+                        size_t depth, char pad_char, size_t pad_size)
+{
+	size_t i = 0, n = ucv_object_length(uv);
+	uc_value_t **vals;
+	char **keys;
+
+	if (n == 0)
+		return;
+
+	keys = xalloc(n * sizeof(*keys));
+	vals = xalloc(n * sizeof(*vals));
+
+	ucv_object_foreach(uv, key, val) {
+		if (i == n)
+			break;
+
+		keys[i] = xstrdup(key);
+		vals[i] = ucv_get(val);
+		i++;
+	}
+
+	n = i;
+
+	for (i = 0; i < n; i++) {
+		if (i)
+			ucv_stringbuf_append(pb, ",");
+
+		ucv_to_stringbuf_add_padding(pb, pad_char, (depth + 1) * pad_size);
+		ucv_to_string_json_encoded(pb, keys[i], strlen(keys[i]), false);
+		ucv_stringbuf_append(pb, ": ");
+		ucv_to_stringbuf_formatted(vm, pb, vals[i], depth + 1,
+		                           pad_char ? pad_char : '\1', pad_size);
+	}
+
+	for (i = 0; i < n; i++) {
+		free(keys[i]);
+		ucv_put(vals[i]);
+	}
+
+	free(keys);
+	free(vals);
+}
+
 void
 ucv_to_stringbuf_formatted(uc_vm_t *vm, uc_stringbuf_t *pb, uc_value_t *uv, size_t depth, char pad_char, size_t pad_size)
 {
@@ -2019,18 +2064,7 @@ ucv_to_stringbuf_formatted(uc_vm_t *vm, uc_stringbuf_t *pb, uc_value_t *uv, size
 
 	case UC_OBJECT:
 		ucv_stringbuf_append(pb, "{");
-
-		i = 0;
-		ucv_object_foreach(uv, key, val) {
-			if (i++)
-				ucv_stringbuf_append(pb, ",");
-
-			ucv_to_stringbuf_add_padding(pb, pad_char, (depth + 1) * pad_size);
-			ucv_to_string_json_encoded(pb, key, strlen(key), false);
-			ucv_stringbuf_append(pb, ": ");
-			ucv_to_stringbuf_formatted(vm, pb, val, depth + 1, pad_char ? pad_char : '\1', pad_size);
-		}
-
+		ucv_object_to_stringbuf(vm, pb, uv, depth, pad_char, pad_size);
 		ucv_to_stringbuf_add_padding(pb, pad_char, depth * pad_size);
 		ucv_stringbuf_append(pb, "}");
 		break;
