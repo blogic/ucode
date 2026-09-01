@@ -3369,7 +3369,7 @@ uc_match(uc_vm_t *vm, size_t nargs)
 	int eflags = 0, res;
 	uc_regexp_t *re;
 	bool freeable;
-	char *p;
+	char *str, *p;
 	size_t i;
 
 	if (ucv_type(pattern) != UC_REGEXP || !subject)
@@ -3382,7 +3382,7 @@ uc_match(uc_vm_t *vm, size_t nargs)
 	if (!pmatch)
 		return NULL;
 
-	p = uc_cast_string(vm, &subject, &freeable);
+	str = p = uc_cast_string(vm, &subject, &freeable);
 
 	while (true) {
 		res = regexec(&re->regexp, p, 1 + re->regexp.re_nsub, pmatch, eflags);
@@ -3425,7 +3425,7 @@ uc_match(uc_vm_t *vm, size_t nargs)
 	free(pmatch);
 
 	if (freeable)
-		free(p);
+		free(str);
 
 	return rv;
 }
