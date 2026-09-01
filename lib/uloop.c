@@ -153,7 +153,12 @@ static void
 uc_uloop_cb_invoke(uc_uloop_cb_t *cb, uc_value_t **args, size_t nargs)
 {
 	uc_vm_t *vm = cb->vm;
-	uc_value_t *func = ucv_resource_value_get(cb->obj, 0);
+	uc_value_t *func;
+
+	if (!cb->obj)
+		return;
+
+	func = ucv_resource_value_get(cb->obj, 0);
 
 	if (!ucv_is_callable(func))
 		return;
@@ -458,7 +463,7 @@ uc_uloop_timer_set(uc_vm_t *vm, size_t nargs)
 	uc_value_t *timeout = uc_fn_arg(0);
 	int t, rv;
 
-	if (!timer)
+	if (!timer || !timer->cb.obj)
 		err_return(EINVAL);
 
 	errno = 0;
@@ -543,6 +548,9 @@ uc_uloop_timer_cb(struct uloop_timeout *timeout)
 	uc_uloop_timer_t *timer = container_of(timeout, uc_uloop_timer_t, timeout);
 
 	uc_uloop_cb_invoke(&timer->cb, NULL, 0);
+
+	if (!timer->timeout.pending)
+		uc_uloop_cb_free(&timer->cb);
 }
 
 /**
