@@ -48,15 +48,54 @@ uc_digest_calc_data(uc_value_t *str, char *(*fn)(const uint8_t *,size_t,char *))
 	return NULL;
 }
 
+#define DIGEST_STREAM_FN(name, ctxtype, initfn, updatefn, endfn)		\
+	static char *												\
+	name(FILE *fp, char *out)									\
+	{															\
+		uint8_t buf[4096];										\
+		ctxtype ctx;											\
+		size_t n;												\
+																\
+		initfn(&ctx);											\
+																\
+		while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)		\
+			updatefn(&ctx, buf, n);								\
+																\
+		if (ferror(fp))											\
+			return NULL;										\
+																\
+		return endfn(&ctx, out);								\
+	}
+
+DIGEST_STREAM_FN(uc_digest_md5_stream, MD5_CTX, MD5Init, MD5Update, MD5End)
+DIGEST_STREAM_FN(uc_digest_sha1_stream, SHA1_CTX, SHA1Init, SHA1Update, SHA1End)
+DIGEST_STREAM_FN(uc_digest_sha256_stream, SHA2_CTX, SHA256Init, SHA256Update, SHA256End)
+
+#ifdef HAVE_DIGEST_EXTENDED
+DIGEST_STREAM_FN(uc_digest_md2_stream, MD2_CTX, MD2Init, MD2Update, MD2End)
+DIGEST_STREAM_FN(uc_digest_md4_stream, MD4_CTX, MD4Init, MD4Update, MD4End)
+DIGEST_STREAM_FN(uc_digest_sha384_stream, SHA2_CTX, SHA384Init, SHA384Update, SHA384End)
+DIGEST_STREAM_FN(uc_digest_sha512_stream, SHA2_CTX, SHA512Init, SHA512Update, SHA512End)
+#endif
+
 static uc_value_t *
-uc_digest_calc_file(uc_value_t *path, char *(fn)(const char *,char *))
+uc_digest_calc_file(uc_value_t *path, char *(fn)(FILE *,char *))
 {
-	char buf[SHA512_DIGEST_STRING_LENGTH];
+	char buf[SHA512_DIGEST_STRING_LENGTH], *res;
+	FILE *fp;
 
 	if( ucv_type(path) != UC_STRING )
 		return NULL;
 
-	if( fn(ucv_string_get(path), buf) )
+	fp = fopen(ucv_string_get(path), "rb");
+
+	if( !fp )
+		return NULL;
+
+	res = fn(fp, buf);
+	fclose(fp);
+
+	if( res )
 		return ucv_string_new(buf);
 
 	return NULL;
@@ -84,12 +123,8 @@ uc_digest_fnv1a64_data_hash(const uint8_t *data, size_t len, char *out)
 }
 
 static char *
-uc_digest_fnv1a64_file_hash(const char *path, char *out)
+uc_digest_fnv1a64_file_hash(FILE *f, char *out)
 {
-	FILE *f = fopen(path, "rb");
-	if (!f)
-		return NULL;
-
 	static const char hex[] = "0123456789abcdef";
 	uint64_t hash = 0xCBF29CE484222325;
 	unsigned char buf[4096];
@@ -102,12 +137,8 @@ uc_digest_fnv1a64_file_hash(const char *path, char *out)
 		}
 	}
 
-	if (ferror(f)) {
-		fclose(f);
+	if (ferror(f))
 		return NULL;
-	}
-
-	fclose(f);
 
 	for (int i = 0; i < 8; i++) {
 		uint8_t byte = (hash >> ((7 - i) * 8)) & 0xFF;
@@ -332,7 +363,7 @@ uc_digest_sha512(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_digest_md5_file(uc_vm_t *vm, size_t nargs)
 {
-	return uc_digest_calc_file(uc_fn_arg(0), MD5File);
+	return uc_digest_calc_file(uc_fn_arg(0), uc_digest_md5_stream);
 }
 
 /**
@@ -350,7 +381,7 @@ uc_digest_md5_file(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_digest_sha1_file(uc_vm_t *vm, size_t nargs)
 {
-	return uc_digest_calc_file(uc_fn_arg(0), SHA1File);
+	return uc_digest_calc_file(uc_fn_arg(0), uc_digest_sha1_stream);
 }
 
 /**
@@ -368,7 +399,7 @@ uc_digest_sha1_file(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_digest_sha256_file(uc_vm_t *vm, size_t nargs)
 {
-	return uc_digest_calc_file(uc_fn_arg(0), SHA256File);
+	return uc_digest_calc_file(uc_fn_arg(0), uc_digest_sha256_stream);
 }
 
 #ifdef HAVE_DIGEST_EXTENDED
@@ -387,7 +418,7 @@ uc_digest_sha256_file(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_digest_md2_file(uc_vm_t *vm, size_t nargs)
 {
-	return uc_digest_calc_file(uc_fn_arg(0), MD2File);
+	return uc_digest_calc_file(uc_fn_arg(0), uc_digest_md2_stream);
 }
 
 /**
@@ -405,7 +436,7 @@ uc_digest_md2_file(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_digest_md4_file(uc_vm_t *vm, size_t nargs)
 {
-	return uc_digest_calc_file(uc_fn_arg(0), MD4File);
+	return uc_digest_calc_file(uc_fn_arg(0), uc_digest_md4_stream);
 }
 
 /**
@@ -423,7 +454,7 @@ uc_digest_md4_file(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_digest_sha384_file(uc_vm_t *vm, size_t nargs)
 {
-	return uc_digest_calc_file(uc_fn_arg(0), SHA384File);
+	return uc_digest_calc_file(uc_fn_arg(0), uc_digest_sha384_stream);
 }
 
 /**
@@ -441,7 +472,7 @@ uc_digest_sha384_file(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_digest_sha512_file(uc_vm_t *vm, size_t nargs)
 {
-	return uc_digest_calc_file(uc_fn_arg(0), SHA512File);
+	return uc_digest_calc_file(uc_fn_arg(0), uc_digest_sha512_stream);
 }
 #endif
 
