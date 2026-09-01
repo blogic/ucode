@@ -1179,8 +1179,12 @@ parse_options(resolve_ctx_t *ctx, uc_value_t *opts)
 
 	v = ucv_object_get(opts, "retries", NULL);
 
-	if (ucv_type(v) == UC_INTEGER)
+	if (ucv_type(v) == UC_INTEGER) {
 		ctx->retries = ucv_uint64_get(v);
+
+		if (ctx->retries == 0)
+			err_return(EINVAL, "Retries value must be greater than zero");
+	}
 	else if (v)
 		err_return(EINVAL, "Retries value not an integer");
 
