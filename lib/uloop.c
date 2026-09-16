@@ -415,12 +415,43 @@ typedef struct {
 	struct uloop_timeout timeout;
 } uc_uloop_timer_t;
 
+/*
+ * A timer holds a reference to itself only while it is armed. Once it has
+ * fired without being rearmed, only script references keep it alive, so a
+ * one-shot timer whose handle was discarded is freed instead of accumulating.
+ */
+static void
+uc_uloop_timer_hold(uc_uloop_timer_t *timer)
+{
+	uc_value_t *obj = timer->cb.obj;
+
+	if (ucv_resource_is_persistent(obj))
+		return;
+
+	ucv_get(obj);
+	ucv_resource_persistent_set(obj, true);
+}
+
+static void
+uc_uloop_timer_release(uc_uloop_timer_t *timer)
+{
+	uc_value_t *obj = timer->cb.obj;
+
+	if (!ucv_resource_persistent_set(obj, false))
+		return;
+
+	ucv_put(obj);
+}
+
 static int
 uc_uloop_timeout_clear(uc_uloop_timer_t *timer)
 {
 	int rv = uloop_timeout_cancel(&timer->timeout);
 
-	uc_uloop_cb_free(&timer->cb);
+	if (ucv_resource_is_persistent(timer->cb.obj))
+		uc_uloop_cb_free(&timer->cb);
+	else
+		timer->cb.obj = NULL;
 
 	return rv;
 }
@@ -458,7 +489,7 @@ uc_uloop_timer_set(uc_vm_t *vm, size_t nargs)
 	uc_value_t *timeout = uc_fn_arg(0);
 	int t, rv;
 
-	if (!timer)
+	if (!timer || !timer->cb.obj)
 		err_return(EINVAL);
 
 	errno = 0;
@@ -468,6 +499,9 @@ uc_uloop_timer_set(uc_vm_t *vm, size_t nargs)
 		err_return(errno);
 
 	rv = uloop_timeout_set(&timer->timeout, t);
+
+	if (rv == 0)
+		uc_uloop_timer_hold(timer);
 
 	ok_return(ucv_boolean_new(rv == 0));
 }
@@ -541,8 +575,14 @@ static void
 uc_uloop_timer_cb(struct uloop_timeout *timeout)
 {
 	uc_uloop_timer_t *timer = container_of(timeout, uc_uloop_timer_t, timeout);
+	uc_value_t *obj = ucv_get(timer->cb.obj);
 
 	uc_uloop_cb_invoke(&timer->cb, NULL, 0);
+
+	if (!timer->timeout.pending)
+		uc_uloop_timer_release(timer);
+
+	ucv_put(obj);
 }
 
 /**
@@ -600,6 +640,8 @@ uc_uloop_timer(uc_vm_t *vm, size_t nargs)
 
 	if (t >= 0)
 		uloop_timeout_set(&timer->timeout, t);
+	else
+		uc_uloop_timer_release(timer);
 
 	ok_return(timer->cb.obj);
 }
@@ -1886,7 +1928,7 @@ uc_uloop_interval_set(uc_vm_t *vm, size_t nargs)
 	uc_value_t *timeout = uc_fn_arg(0);
 	int t, rv;
 
-	if (!interval)
+	if (!interval || !interval->cb.obj)
 		err_return(EINVAL);
 
 	errno = 0;
