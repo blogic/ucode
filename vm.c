@@ -2425,7 +2425,9 @@ uc_vm_insn_marr(uc_vm_t *vm, uc_vm_insn_t insn)
 static void
 uc_vm_insn_nobj(uc_vm_t *vm, uc_vm_insn_t insn)
 {
-	uc_value_t *obj = ucv_object_new(vm);
+	size_t nkeys = vm->arg.u32 / 2;
+	uc_value_t *obj = nkeys ? ucv_object_new_size(vm, nkeys + nkeys / 2 + 1)
+	                        : ucv_object_new(vm);
 
 	uc_vm_stack_push(vm, obj);
 }
