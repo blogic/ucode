@@ -1,0 +1,33 @@
+This testcase verifies that a module whose load raised an exception is
+not stored in the modules table.
+
+A cached failed load made the next require() of the same name return
+null without an error. Each require() must try the load again and
+report the error again.
+
+-- Testcase --
+for (let i = 0; i < 2; i++) {
+	try {
+		print(require('broken'), "\n");
+	}
+	catch (e) {
+		print(e.type, ": ", split(e.message, "\n")[0], "\n");
+	}
+}
+
+print(exists(modules, 'broken'), "\n");
+-- End --
+
+-- File broken.uc --
+let x = ;
+-- End --
+
+-- Args --
+-R -L files/
+-- End --
+
+-- Expect stdout --
+Runtime error: Unable to compile source file 'files/broken.uc':
+Runtime error: Unable to compile source file 'files/broken.uc':
+false
+-- End --
