@@ -243,7 +243,7 @@ else()
   include_directories(${JSONC_INCLUDE_DIRS})
 endif()
 
-set(UCODE_SOURCES lexer.c lib.c vm.c chunk.c vallist.c compiler.c source.c types.c program.c platform.c)
+set(UCODE_SOURCES lexer.c lib.c vm.c chunk.c vallist.c compiler.c source.c types.c program.c platform.c cli.c)
 if(UCODE_WASM)
   add_library(libucode STATIC ${UCODE_SOURCES})
   set_target_properties(libucode PROPERTIES OUTPUT_NAME ucode)

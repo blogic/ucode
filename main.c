@@ -30,7 +30,7 @@
 #include "ucode/source.h"
 #include "ucode/program.h"
 
-#include "ucode/internal/json-c-compat.h"
+#include "ucode/internal/cli.h"
 
 #ifdef __GLIBC__
 # define POSIXLY_CORRECT_FLAG "+"
@@ -128,9 +128,6 @@ print_usage(const char *app)
 		app);
 }
 
-static bool
-parse_library_load(char *opt, uc_vm_t *vm);
-
 static uc_value_t *
 debug_lookup_fn(uc_vm_t *vm, const char *name)
 {
@@ -159,7 +156,6 @@ typedef struct {
 	debug_mode_t debug;
 	char *breakpoint;
 } compile_opts_t;
-
 static int
 compile(uc_vm_t *vm, uc_source_t *src, FILE *precompile, const compile_opts_t *opts)
 {
@@ -195,7 +191,7 @@ compile(uc_vm_t *vm, uc_source_t *src, FILE *precompile, const compile_opts_t *o
 	if (debug != DEBUG_MODE_NONE) {
 		uc_value_t *entryfn;
 
-		if (!parse_library_load("debug", vm)) {
+		if (!uc_cli_library_load("debug", vm)) {
 			fprintf(stderr, "Unable to load debug module\n");
 			rc = -2;
 			goto out;
@@ -456,212 +452,6 @@ parse_compile_flags(char *opt, char **interp, uc_search_path_t *dynlink_list,
 	}
 }
 
-static bool
-parse_define_file(char *opt, uc_value_t *globals)
-{
-	enum json_tokener_error err = json_tokener_continue;
-	char buf[128], *name = NULL, *p;
-	struct json_tokener *tok;
-	json_object *jso = NULL;
-	size_t rlen;
-	FILE *fp;
-
-	p = strchr(opt, '=');
-
-	if (p) {
-		name = opt;
-		*p++ = 0;
-	}
-	else {
-		p = opt;
-	}
-
-	if (!strcmp(p, "-")) {
-		if (!stdin_unused) {
-			fprintf(stderr, "The stdin can only be read once\n");
-
-			return false;
-		}
-
-		fp = stdin_unused;
-		stdin_unused = NULL;
-	}
-	else
-		fp = fopen(p, "r");
-
-	if (!fp) {
-		fprintf(stderr, "Unable to open definition file \"%s\": %s\n",
-		        p, strerror(errno));
-
-		return true;
-	}
-
-	tok = xjs_new_tokener();
-
-	while (true) {
-		rlen = fread(buf, 1, sizeof(buf), fp);
-
-		if (rlen == 0)
-			break;
-
-		jso = json_tokener_parse_ex(tok, buf, rlen);
-		err = json_tokener_get_error(tok);
-
-		if (err != json_tokener_continue)
-			break;
-	}
-
-	json_tokener_free(tok);
-	fclose(fp);
-
-	if (err != json_tokener_success || !json_object_is_type(jso, json_type_object)) {
-		json_object_put(jso);
-
-		fprintf(stderr, "Invalid definition file \"%s\": %s\n",
-		        p, (err != json_tokener_success)
-		             ? "JSON parse failure" : "Not a valid JSON object");
-
-		return false;
-	}
-
-	if (name && *name) {
-		ucv_object_add(globals, name, ucv_from_json(NULL, jso));
-	}
-	else {
-		json_object_object_foreach(jso, key, val)
-			ucv_object_add(globals, key, ucv_from_json(NULL, val));
-	}
-
-	json_object_put(jso);
-
-	return true;
-}
-
-static bool
-parse_define_string(char *opt, uc_value_t *globals)
-{
-	enum json_tokener_error err;
-	struct json_tokener *tok;
-	json_object *jso = NULL;
-	char *name = NULL, *p;
-	bool rv = false;
-	size_t len;
-
-	p = strchr(opt, '=');
-
-	if (p) {
-		name = opt;
-		*p++ = 0;
-	}
-	else {
-		p = opt;
-	}
-
-	len = strlen(p);
-	tok = xjs_new_tokener();
-
-	/* NB: the len + 1 here is intentional to pass the terminating \0 byte
-	 * to the json-c parser. This is required to work-around upstream
-	 * issue #681 <https://github.com/json-c/json-c/issues/681> */
-	jso = json_tokener_parse_ex(tok, p, len + 1);
-
-	err = json_tokener_get_error(tok);
-
-	/* Treat trailing bytes after a parsed value as error */
-	if (err == json_tokener_success && json_tokener_get_parse_end(tok) < len)
-		err = json_tokener_error_parse_unexpected;
-
-	json_tokener_free(tok);
-
-	if (err != json_tokener_success) {
-		json_object_put(jso);
-
-		if (!name || !*name) {
-			fprintf(stderr, "Invalid -D option value \"%s\": %s\n",
-			        p, json_tokener_error_desc(err));
-
-			return false;
-		}
-
-		ucv_object_add(globals, name, ucv_string_new(p));
-
-		return true;
-	}
-
-	if (name && *name) {
-		ucv_object_add(globals, name, ucv_from_json(NULL, jso));
-		rv = true;
-	}
-	else if (json_object_is_type(jso, json_type_object)) {
-		json_object_object_foreach(jso, key, val)
-			ucv_object_add(globals, key, ucv_from_json(NULL, val));
-		rv = true;
-	}
-	else {
-		fprintf(stderr, "Invalid -D option value \"%s\": Not a valid JSON object\n", p);
-	}
-
-	json_object_put(jso);
-
-	return rv;
-}
-
-static void
-parse_search_path(char *pattern, uc_parse_config_t *config)
-{
-	size_t len;
-	char *p;
-
-	if (strchr(pattern, '*')) {
-		uc_search_path_add(&config->module_search_path, pattern);
-		return;
-	}
-
-	len = strlen(pattern);
-
-	if (!len)
-		return;
-
-	while (pattern[len-1] == '/')
-		pattern[--len] = 0;
-
-	xasprintf(&p, "%s/*.so", pattern);
-	uc_search_path_add(&config->module_search_path, p);
-	free(p);
-
-	xasprintf(&p, "%s/*.uc", pattern);
-	uc_search_path_add(&config->module_search_path, p);
-	free(p);
-}
-
-static bool
-parse_library_load(char *opt, uc_vm_t *vm)
-{
-	char *name = NULL, *p;
-	uc_value_t *lib, *ctx;
-
-	p = strchr(opt, '=');
-
-	if (p) {
-		name = opt;
-		*p++ = 0;
-	}
-	else {
-		p = opt;
-	}
-
-	lib = ucv_string_new(p);
-	ctx = uc_vm_invoke(vm, "require", 1, lib);
-	ucv_put(lib);
-
-	if (!ctx)
-		return vm->exception.type == EXCEPTION_NONE;
-
-	ucv_object_add(uc_vm_scope_get(vm), name ? name : p, ctx);
-
-	return true;
-}
-
 static const char *
 appname(const char *argv0)
 {
@@ -723,7 +513,7 @@ main(int argc, char **argv)
 	{
 		switch (opt) {
 		case 'L':
-			parse_search_path(optarg, &config);
+			uc_cli_search_path(optarg, &config);
 			break;
 
 		case 'S':
@@ -784,7 +574,7 @@ main(int argc, char **argv)
 			break;
 
 		case 'D':
-			if (!parse_define_string(optarg, uc_vm_scope_get(&vm))) {
+			if (!uc_cli_define_string(optarg, uc_vm_scope_get(&vm))) {
 				rv = 1;
 				goto out;
 			}
@@ -792,7 +582,7 @@ main(int argc, char **argv)
 			break;
 
 		case 'F':
-			if (!parse_define_file(optarg, uc_vm_scope_get(&vm))) {
+			if (!uc_cli_define_file(optarg, uc_vm_scope_get(&vm), &stdin_unused)) {
 				rv = 1;
 				goto out;
 			}
@@ -804,7 +594,7 @@ main(int argc, char **argv)
 			break;
 
 		case 'l':
-			if (!parse_library_load(optarg, &vm)) {
+			if (!uc_cli_library_load(optarg, &vm)) {
 				rv = 1;
 				goto out;
 			}
