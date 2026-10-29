@@ -21,11 +21,11 @@
 
 #include <stdio.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdarg.h> /* va_start(), va_end(), va_list */
 #include <string.h> /* strdup() */
-#include <json-c/json.h>
 
 
 /* alignment & array size */
@@ -78,17 +78,6 @@ static inline char *xstrdup(const char *s) {
 	return ptr;
 }
 
-static inline struct json_tokener *xjs_new_tokener(void) {
-	struct json_tokener *tok = json_tokener_new();
-
-	if (!tok) {
-		fprintf(stderr, "Out of memory\n");
-		abort();
-	}
-
-	return tok;
-}
-
 __attribute__((format(printf, 2, 0)))
 static inline int xasprintf(char **strp, const char *fmt, ...) {
 	va_list ap;
@@ -118,16 +107,34 @@ static inline int xvasprintf(char **strp, const char *fmt, va_list ap) {
 	return len;
 }
 
-static inline struct printbuf *xprintbuf_new(void) {
-	struct printbuf *pb = printbuf_new();
+/* string buffers; `buf` is NUL-terminated after `bpos` bytes */
 
-	if (!pb) {
-		fprintf(stderr, "Out of memory\n");
-		abort();
-	}
+typedef struct {
+	char *buf;
+	int bpos;
+	int size;
+} uc_stringbuf_t;
 
-	return pb;
+uc_stringbuf_t *uc_stringbuf_new(void);
+void uc_stringbuf_free(uc_stringbuf_t *sb);
+void uc_stringbuf_grow(uc_stringbuf_t *sb, size_t size);
+int uc_stringbuf_memset(uc_stringbuf_t *sb, int offset, int c, size_t len);
+void uc_stringbuf_reset(uc_stringbuf_t *sb);
+int uc_stringbuf_printf(uc_stringbuf_t *sb, const char *fmt, ...);
+
+static inline void
+uc_stringbuf_add(uc_stringbuf_t *sb, const char *s, size_t len)
+{
+	if ((size_t)sb->bpos + len + 1 > (size_t)sb->size)
+		uc_stringbuf_grow(sb, (size_t)sb->bpos + len + 1);
+
+	memcpy(sb->buf + sb->bpos, s, len);
+	sb->bpos += len;
+	sb->buf[sb->bpos] = 0;
 }
+
+#define uc_stringbuf_length(sb) ((sb)->bpos)
+#define uc_stringbuf_append(sb, str) uc_stringbuf_add((sb), "" str, sizeof(str) - 1)
 
 
 /* linked lists */
@@ -154,6 +161,88 @@ static inline void uc_list_remove(uc_list_t *item)
 
 #define uc_list_foreach(item, list) \
 	for (uc_list_t *item = (list)->next; item != (list); item = item->next)
+
+
+/* sets of pointers, kept in insertion order in `entries`; items are equal
+ * by `equal`, or as pointers if it is NULL, and `hash` must agree with it */
+
+typedef struct {
+	size_t count;
+	void **entries;
+	size_t *index;
+	size_t mask;
+	unsigned long (*hash)(const void *);
+	int (*equal)(const void *, const void *);
+} uc_set_t;
+
+static inline unsigned long
+uc_set_hash(uc_set_t *set, const void *item)
+{
+	return set->hash ? set->hash(item) : (unsigned long)((uintptr_t)item * 2654435761u);
+}
+
+static inline bool
+uc_set_has(uc_set_t *set, const void *item)
+{
+	if (!set->index)
+		return false;
+
+	for (size_t i = uc_set_hash(set, item) & set->mask; set->index[i]; i = (i + 1) & set->mask) {
+		void *e = set->entries[set->index[i] - 1];
+
+		if (set->equal ? set->equal(e, item) : (e == item))
+			return true;
+	}
+
+	return false;
+}
+
+static inline void
+uc_set_index_add(uc_set_t *set, size_t pos)
+{
+	size_t i = uc_set_hash(set, set->entries[pos]) & set->mask;
+
+	while (set->index[i])
+		i = (i + 1) & set->mask;
+
+	set->index[i] = pos + 1;
+}
+
+/* Adds `item` unless the set has it; returns whether it was added */
+static inline bool
+uc_set_add(uc_set_t *set, void *item)
+{
+	size_t slots = set->index ? set->mask + 1 : 0;
+
+	if (uc_set_has(set, item))
+		return false;
+
+	if ((set->count + 1) * 4 > slots * 3) {
+		slots = slots ? slots * 2 : 16;
+		free(set->index);
+		set->index = xcalloc(slots, sizeof(*set->index));
+		set->mask = slots - 1;
+		set->entries = xrealloc(set->entries, slots * sizeof(*set->entries));
+
+		for (size_t pos = 0; pos < set->count; pos++)
+			uc_set_index_add(set, pos);
+	}
+
+	set->entries[set->count] = item;
+	uc_set_index_add(set, set->count++);
+
+	return true;
+}
+
+static inline void
+uc_set_free(uc_set_t *set)
+{
+	free(set->entries);
+	free(set->index);
+	set->entries = NULL;
+	set->index = NULL;
+	set->count = 0;
+}
 
 
 /* vector macros */

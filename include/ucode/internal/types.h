@@ -108,14 +108,8 @@ struct uc_function {
 
 typedef struct {
 	uc_list_t list;
-	struct lh_table *table;
-	union {
-		struct lh_entry *pos;
-		struct {
-			const void *k;
-			unsigned long hash;
-		} kh;
-	} u;
+	uc_object_t *object;
+	size_t pos;
 } uc_object_iterator_t;
 
 
@@ -179,6 +173,41 @@ __hidden void ucv_free(uc_value_t *, bool);
 __hidden void ucv_unref(uc_weakref_t *);
 __hidden void ucv_ref(uc_weakref_t *, uc_weakref_t *);
 __hidden void ucv_freeall(uc_vm_t *);
+
+/* ucv_object_get(), ucv_object_add() and ucv_object_delete() for keys of a
+ * given length, which may contain NUL bytes */
+__hidden uc_value_t *ucv_object_lookup(uc_value_t *, const char *, size_t, bool *);
+__hidden bool ucv_object_insert(uc_value_t *, const char *, size_t, uc_value_t *);
+__hidden bool ucv_object_remove(uc_value_t *, const char *, size_t);
+
+/* ucv_object_get() and ucv_object_add() with the key as a string value,
+ * which the object shares */
+__hidden uc_value_t *ucv_object_lookup_string(uc_value_t *, uc_value_t *, bool *);
+__hidden bool ucv_object_insert_string(uc_value_t *, uc_value_t *, uc_value_t *);
+
+__hidden void ucv_object_sort_entries(uc_value_t *,
+	int (*)(const uc_object_entry_t *, const uc_object_entry_t *, void *), void *);
+
+/* Returns the entry after `e`, or the first one if `e` is NULL, skipping
+ * deleted entries; NULL at the end or if `uv` is no object. */
+static inline uc_object_entry_t *
+ucv_object_entry_next(uc_value_t *uv, uc_object_entry_t *e)
+{
+	uc_object_t *object = (uc_object_t *)uv;
+
+	if (ucv_type(uv) != UC_OBJECT)
+		return NULL;
+
+	for (e = e ? e + 1 : object->entries; e && e < object->entries + object->used; e++)
+		if (e->key)
+			return e;
+
+	return NULL;
+}
+
+#define ucv_object_foreach_entry(obj, e) \
+	for (uc_object_entry_t *e = ucv_object_entry_next((obj), NULL); e; \
+	     e = ucv_object_entry_next((obj), e))
 
 /* Type-cast helpers */
 #define ucv_as_integer(v)   ((uc_integer_t *)   (v))

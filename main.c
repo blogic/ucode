@@ -290,11 +290,11 @@ compile(uc_vm_t *vm, uc_source_t *src, FILE *precompile, const compile_opts_t *o
 				fwrite(ucv_string_get(res), ucv_string_length(res), 1, stdout);
 			}
 			else {
-				uc_stringbuf_t *pb = xprintbuf_new();
+				uc_stringbuf_t *pb = uc_stringbuf_new();
 
 				ucv_to_stringbuf_formatted(vm, pb, res, 0, '\t', 1);
 				fwrite(pb->buf, pb->bpos, 1, stdout);
-				printbuf_free(pb);
+				uc_stringbuf_free(pb);
 			}
 		}
 

@@ -62,7 +62,7 @@ typedef struct CPState {
   uint8_t packstack[CPARSE_MAX_PACKSTACK];  /* Stack for pack pragmas. */
   uint8_t curpack;	/* Current position in pack pragma stack. */
   uc_vm_t *uv_vm;
-  struct printbuf pb;
+  uc_stringbuf_t pb;
   uc_value_t *uv_str;
   uc_value_t **uv_param;
   char *error;

@@ -16,6 +16,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <inttypes.h>
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
@@ -323,7 +324,7 @@ void uc_vm_free(uc_vm_t *vm)
 	uc_vector_clear(&vm->stack);
 	uc_vector_clear(&vm->callframes);
 
-	printbuf_free(vm->strbuf);
+	uc_stringbuf_free(vm->strbuf);
 
 	ucv_freeall(vm);
 
@@ -451,15 +452,15 @@ static char *
 uc_vm_format_val(uc_vm_t *vm, uc_value_t *val)
 {
 	if (!vm->strbuf)
-		vm->strbuf = xprintbuf_new();
+		vm->strbuf = uc_stringbuf_new();
 	else
-		printbuf_reset(vm->strbuf);
+		uc_stringbuf_reset(vm->strbuf);
 
 	ucv_to_stringbuf(NULL, vm->strbuf, val, true);
 
-	if (printbuf_length(vm->strbuf) >= 64) {
-		printbuf_memset(vm->strbuf, 60, '.', 3);
-		printbuf_memset(vm->strbuf, 63, 0, 1);
+	if (uc_stringbuf_length(vm->strbuf) >= 64) {
+		uc_stringbuf_memset(vm->strbuf, 60, '.', 3);
+		uc_stringbuf_memset(vm->strbuf, 63, 0, 1);
 	}
 
 	return vm->strbuf->buf;
@@ -1052,11 +1053,11 @@ uc_dump_insn(uc_vm_t *vm, uint8_t *pos, uc_vm_insn_t insn)
 	source = uc_vm_frame_source(frame);
 
 	if (last_srcpos == 0 || last_source != source || srcpos != last_srcpos) {
-		buf = xprintbuf_new();
+		buf = uc_stringbuf_new();
 
 		uc_source_context_format(buf, source, srcpos, true);
-		fwrite(buf->buf, 1, printbuf_length(buf), stderr);
-		printbuf_free(buf);
+		fwrite(buf->buf, 1, uc_stringbuf_length(buf), stderr);
+		uc_stringbuf_free(buf);
 
 		last_source = source;
 		last_srcpos = srcpos;
@@ -2519,8 +2520,7 @@ static void
 uc_vm_insn_nobj(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	size_t nkeys = vm->arg.u32 / 2;
-	uc_value_t *obj = nkeys ? ucv_object_new_size(vm, nkeys / LH_LOAD_FACTOR + 1)
-	                        : ucv_object_new(vm);
+	uc_value_t *obj = ucv_object_new_size(vm, nkeys);
 
 	uc_vm_stack_push(vm, obj);
 }
@@ -2595,8 +2595,8 @@ uc_vm_insn_mobj(uc_vm_t *vm, uc_vm_insn_t insn)
 	switch (ucv_type(src)) {
 	case UC_OBJECT:
 		; /* a label can only be part of a statement and a declaration is not a statement */
-		ucv_object_foreach(src, k, v)
-			ucv_object_add(dst, k, ucv_get(v));
+		ucv_object_foreach_entry(src, e)
+			ucv_object_insert_string(dst, e->key, ucv_get(e->value));
 
 		ucv_put(src);
 		break;
@@ -2771,7 +2771,7 @@ uc_vm_key_exists(uc_value_t *scope, uc_value_t *key)
 		return false;
 
 	for (o = scope; o != NULL && !found; o = ucv_prototype_get(o))
-		ucv_object_get(o, ucv_string_get(key), &found);
+		ucv_object_lookup(o, ucv_string_get(key), ucv_string_length(key), &found);
 
 	return found;
 }
@@ -2933,10 +2933,11 @@ uc_vm_object_iterator_next(uc_vm_t *vm, uc_vm_insn_t insn,
 	uc_resource_t *res = ucv_as_resource(k);
 	uc_object_t *obj = ucv_as_object(v);
 	uc_object_iterator_t *iter;
+	uc_object_entry_t *e;
 
 	if (!res) {
 		/* object is empty */
-		if (!obj->table->head)
+		if (!obj->count)
 			return false;
 
 		res = xalloc(sizeof(*res) + sizeof(uc_object_iterator_t));
@@ -2945,8 +2946,8 @@ uc_vm_object_iterator_next(uc_vm_t *vm, uc_vm_insn_t insn,
 		res->type = &uc_vm_object_iterator_type;
 
 		iter = res->data = (char *)res + sizeof(*res);
-		iter->table = obj->table;
-		iter->u.pos = obj->table->head;
+		iter->object = obj;
+		iter->pos = 0;
 
 		uc_list_insert(&uc_thread_context_get()->object_iterators, &iter->list);
 	}
@@ -2961,22 +2962,24 @@ uc_vm_object_iterator_next(uc_vm_t *vm, uc_vm_insn_t insn,
 		return false;
 	}
 
+	while (iter->pos < obj->used && !obj->entries[iter->pos].key)
+		iter->pos++;
+
 	/* no next key */
-	if (!iter->u.pos) {
+	if (iter->pos >= obj->used) {
 		uc_list_remove(&iter->list);
 
 		return false;
 	}
 
-	uc_vm_stack_push(vm, ucv_string_new(iter->u.pos->k));
+	e = &obj->entries[iter->pos++];
+	uc_vm_stack_push(vm, ucv_get(e->key));
 
 	if (insn == I_NEXTKV)
-		uc_vm_stack_push(vm, ucv_get((uc_value_t *)iter->u.pos->v));
+		uc_vm_stack_push(vm, ucv_get(e->value));
 
 	uc_vm_stack_push(vm, &res->header);
 	ucv_put(v);
-
-	iter->u.pos = iter->u.pos->next;
 
 	return true;
 }
@@ -3283,8 +3286,8 @@ uc_vm_insn_dynload(uc_vm_t *vm, uc_vm_insn_t insn)
 	if (count == 0) {
 		modobj = ucv_object_new(vm);
 
-		ucv_object_foreach(modscope, k, v)
-			ucv_object_add(modobj, k, ucv_get(v));
+		ucv_object_foreach_entry(modscope, e)
+			ucv_object_insert_string(modobj, e->key, ucv_get(e->value));
 
 		ucv_set_constant(modobj, true);
 
@@ -3842,12 +3845,12 @@ uc_vm_execute(uc_vm_t *vm, uc_program_t *program, uc_value_t **retval)
 	uc_vm_run_begin(closure, !kept);
 
 	if (vm->trace) {
-		buf = xprintbuf_new();
+		buf = uc_stringbuf_new();
 
 		uc_source_context_format(buf, uc_vm_frame_source(frame), 0, true);
 
-		fwrite(buf->buf, 1, printbuf_length(buf), stderr);
-		printbuf_free(buf);
+		fwrite(buf->buf, 1, uc_stringbuf_length(buf), stderr);
+		uc_stringbuf_free(buf);
 
 		uc_vm_frame_dump(vm, frame);
 	}

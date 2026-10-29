@@ -247,7 +247,7 @@ args_get_(uc_vm_t *vm, size_t nargs, int *fdptr, ...)
 static void
 strbuf_free(uc_stringbuf_t *sb)
 {
-	printbuf_free(sb);
+	uc_stringbuf_free(sb);
 }
 
 static bool
@@ -257,7 +257,7 @@ strbuf_grow(uc_stringbuf_t *sb, size_t size)
 		if (size > (size_t)INT_MAX - sizeof(uc_string_t))
 			err_return(EOVERFLOW, "Requested size too large");
 
-		if (printbuf_memset(sb, sizeof(uc_string_t) + size - 1, '\0', 1))
+		if (uc_stringbuf_memset(sb, sizeof(uc_string_t) + size - 1, '\0', 1))
 			err_return(ENOMEM, "Out of memory");
 	}
 
@@ -307,7 +307,7 @@ strbuf_alloc(size_t size)
 	uc_stringbuf_t *sb = ucv_stringbuf_new();
 
 	if (!strbuf_grow(sb, size)) {
-		printbuf_free(sb);
+		uc_stringbuf_free(sb);
 
 		return NULL;
 	}
@@ -4260,7 +4260,7 @@ uc_socket_inst_sendmsg(uc_vm_t *vm, size_t nargs)
 				msg.msg_iov[i].iov_len = ucv_string_length(item);
 			}
 			else if (item) {
-				struct printbuf *pb = xprintbuf_new();
+				uc_stringbuf_t *pb = uc_stringbuf_new();
 				uc_vector_push(&sbarr, pb);
 				ucv_to_stringbuf(vm, pb, item, false);
 				msg.msg_iov[i].iov_base = pb->buf;
@@ -4275,7 +4275,7 @@ uc_socket_inst_sendmsg(uc_vm_t *vm, size_t nargs)
 		vec.iov_len = ucv_string_length(data);
 	}
 	else if (data) {
-		struct printbuf *pb = xprintbuf_new();
+		uc_stringbuf_t *pb = uc_stringbuf_new();
 		uc_vector_push(&sbarr, pb);
 		ucv_to_stringbuf(vm, pb, data, false);
 		msg.msg_iovlen = 1;
@@ -4296,7 +4296,7 @@ uc_socket_inst_sendmsg(uc_vm_t *vm, size_t nargs)
 	} while (ret == -1 && errno == EINTR);
 
 	while (sbarr.count > 0)
-		printbuf_free(sbarr.entries[--sbarr.count]);
+		uc_stringbuf_free(sbarr.entries[--sbarr.count]);
 
 	uc_vector_clear(&sbarr);
 

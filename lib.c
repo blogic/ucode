@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <ctype.h>
 #include <errno.h>
@@ -50,7 +51,7 @@
 #include "ucode/internal/source.h"
 #include "ucode/internal/program.h"
 #include "ucode/internal/platform.h"
-#include "ucode/internal/json-c-compat.h"
+#include "ucode/json.h"
 
 /* Appends the printed form of `line`, followed by a marker underlining the
  * byte range [sbegin, send) of the enclosing statement within it. When no
@@ -278,7 +279,7 @@ uc_error_message_indent(char **msg) {
 	if (!msg || !*msg)
 		return;
 
-	buf = xprintbuf_new();
+	buf = uc_stringbuf_new();
 	s = *msg;
 	len = strlen(s);
 
@@ -995,7 +996,7 @@ uc_exists(uc_vm_t *vm, size_t nargs)
 
 	k = uc_cast_string(vm, &key, &freeable);
 
-	ucv_object_get(obj, k, &found);
+	ucv_object_lookup(obj, k, freeable ? strlen(k) : ucv_string_length(key), &found);
 
 	if (freeable)
 		free(k);
@@ -1379,12 +1380,51 @@ uc_keys(uc_vm_t *vm, size_t nargs)
 
 	arr = ucv_array_new(vm);
 
-	ucv_object_foreach(obj, key, val) {
-		(void)val;
-		ucv_array_push(arr, ucv_string_new(key));
-	}
+	ucv_object_foreach_entry(obj, e)
+		ucv_array_push(arr, ucv_get(e->key));
 
 	return arr;
+}
+
+/* The string value of the argument with its ASCII letters in lower case, or
+ * in upper case; a string converts into the result without a buffer */
+static uc_value_t *
+uc_case_convert(uc_vm_t *vm, size_t nargs, bool upper)
+{
+	uc_value_t *arg = uc_fn_arg(0), *rv = NULL;
+	uc_stringbuf_t *buf = NULL;
+	char tmp[sizeof(void *)], *s, *d;
+	size_t i, len;
+
+	if (ucv_type(arg) == UC_STRING) {
+		s = ucv_string_get(arg);
+		len = ucv_string_length(arg);
+	}
+	else {
+		buf = uc_stringbuf_new();
+		ucv_to_stringbuf(vm, buf, arg, false);
+		s = buf->buf;
+		len = uc_stringbuf_length(buf);
+	}
+
+	if (len + 1 < sizeof(void *))
+		d = tmp;
+	else
+		rv = ucv_string_alloc(&d, len);
+
+	for (i = 0; i < len; i++) {
+		if (upper)
+			d[i] = (s[i] >= 'a' && s[i] <= 'z') ? (s[i] & ~32) : s[i];
+		else
+			d[i] = (s[i] >= 'A' && s[i] <= 'Z') ? (s[i] | 32) : s[i];
+	}
+
+	if (!rv)
+		rv = ucv_string_new_length(tmp, len);
+
+	uc_stringbuf_free(buf);
+
+	return rv;
 }
 
 /**
@@ -1406,25 +1446,7 @@ uc_keys(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_lc(uc_vm_t *vm, size_t nargs)
 {
-	uc_stringbuf_t *buf = xprintbuf_new();
-	uc_value_t *rv;
-	size_t i, len;
-	char *s;
-
-	ucv_to_stringbuf(vm, buf, uc_fn_arg(0), false);
-
-	s = buf->buf;
-	len = printbuf_length(buf);
-
-	for (i = 0; i < len; i++)
-		if (s[i] >= 'A' && s[i] <= 'Z')
-			s[i] |= 32;
-
-	rv = ucv_string_new_length(s, len);
-
-	printbuf_free(buf);
-
-	return rv;
+	return uc_case_convert(vm, nargs, false);
 }
 
 /**
@@ -1757,9 +1779,10 @@ array_sort_fn(uc_value_t *v1, uc_value_t *v2, void *ud)
 }
 
 static int
-object_sort_fn(const char *k1, uc_value_t *v1, const char *k2, uc_value_t *v2,
-               void *ud)
+object_sort_fn(const uc_object_entry_t *e1, const uc_object_entry_t *e2, void *ud)
 {
+	size_t l1 = ucv_string_length(e1->key), l2 = ucv_string_length(e2->key);
+	uc_value_t *k1 = e1->key, *k2 = e2->key;
 	uc_value_t *rv, *null = ucv_int64_new(0);
 	sort_ctx_t *ctx = ud;
 	int res;
@@ -1767,15 +1790,18 @@ object_sort_fn(const char *k1, uc_value_t *v1, const char *k2, uc_value_t *v2,
 	if (ctx->ex)
 		return 0;
 
-	if (!ctx->fn)
-		return strcmp(k1, k2);
+	if (!ctx->fn) {
+		res = memcmp(ucv_string_get(k1), ucv_string_get(k2), l1 < l2 ? l1 : l2);
+
+		return res ? res : (l1 > l2) - (l1 < l2);
+	}
 
 	uc_vm_ctx_push(ctx->vm);
 	uc_vm_stack_push(ctx->vm, ucv_get(ctx->fn));
-	uc_vm_stack_push(ctx->vm, ucv_string_new(k1));
-	uc_vm_stack_push(ctx->vm, ucv_string_new(k2));
-	uc_vm_stack_push(ctx->vm, ucv_get(v1));
-	uc_vm_stack_push(ctx->vm, ucv_get(v2));
+	uc_vm_stack_push(ctx->vm, ucv_get(k1));
+	uc_vm_stack_push(ctx->vm, ucv_get(k2));
+	uc_vm_stack_push(ctx->vm, ucv_get(e1->value));
+	uc_vm_stack_push(ctx->vm, ucv_get(e2->value));
 
 	if (uc_vm_call(ctx->vm, true, 4)) {
 		ctx->ex = true;
@@ -1844,7 +1870,7 @@ uc_sort(uc_vm_t *vm, size_t nargs)
 		break;
 
 	case UC_OBJECT:
-		ucv_object_sort_r(val, object_sort_fn, &ctx);
+		ucv_object_sort_entries(val, object_sort_fn, &ctx);
 		break;
 
 	default:
@@ -2292,25 +2318,7 @@ uc_time(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_uc(uc_vm_t *vm, size_t nargs)
 {
-	uc_stringbuf_t *buf = xprintbuf_new();
-	uc_value_t *rv;
-	size_t i, len;
-	char *s;
-
-	ucv_to_stringbuf(vm, buf, uc_fn_arg(0), false);
-
-	s = buf->buf;
-	len = printbuf_length(buf);
-
-	for (i = 0; i < len; i++)
-		if (s[i] >= 'a' && s[i] <= 'z')
-			s[i] &= ~32;
-
-	rv = ucv_string_new_length(s, len);
-
-	printbuf_free(buf);
-
-	return rv;
+	return uc_case_convert(vm, nargs, true);
 }
 
 /**
@@ -2920,14 +2928,14 @@ uc_sprintf(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_printf(uc_vm_t *vm, size_t nargs)
 {
-	uc_stringbuf_t *buf = xprintbuf_new();
+	uc_stringbuf_t *buf = uc_stringbuf_new();
 	size_t len;
 
 	uc_printf_common(vm, nargs, buf);
 
-	len = fwrite(buf->buf, 1, printbuf_length(buf), vm->output);
+	len = fwrite(buf->buf, 1, uc_stringbuf_length(buf), vm->output);
 
-	printbuf_free(buf);
+	uc_stringbuf_free(buf);
 
 	return ucv_int64_new(len);
 }
@@ -3064,7 +3072,7 @@ static bool
 uc_require_path(uc_vm_t *vm, const char *path_template, const char *name,
                 uc_value_t **res, bool module_mode)
 {
-	uc_stringbuf_t *buf = xprintbuf_new();
+	uc_stringbuf_t *buf = uc_stringbuf_new();
 	const char *p, *q, *last;
 	uc_value_t *modtable;
 	bool rv;
@@ -3110,7 +3118,7 @@ uc_require_path(uc_vm_t *vm, const char *path_template, const char *name,
 		ucv_object_add(modtable, name, ucv_get(*res));
 
 out:
-	printbuf_free(buf);
+	uc_stringbuf_free(buf);
 
 	return rv;
 }
@@ -3766,13 +3774,13 @@ uc_replace(uc_vm_t *vm, size_t nargs)
 	return ucv_stringbuf_finish(resbuf);
 }
 
-static struct json_tokener *
-uc_json_from_object(uc_vm_t *vm, uc_value_t *obj, json_object **jso)
+static uc_json_parser_t *
+uc_json_from_object(uc_vm_t *vm, uc_value_t *obj, uc_value_t **val)
 {
 	bool trail = false, eof = false;
-	enum json_tokener_error err;
-	struct json_tokener *tok = NULL;
+	uc_json_parser_t *parser = NULL;
 	uc_value_t *rfn, *rbuf = NULL;
+	uc_json_error_t err;
 	uc_stringbuf_t *buf;
 
 	rfn = ucv_get(ucv_property_get(obj, "read"));
@@ -3784,7 +3792,7 @@ uc_json_from_object(uc_vm_t *vm, uc_value_t *obj, json_object **jso)
 		goto out;
 	}
 
-	tok = xjs_new_tokener();
+	parser = uc_json_parser_new(vm);
 
 	while (true) {
 		uc_vm_stack_push(vm, ucv_get(obj));
@@ -3801,16 +3809,16 @@ uc_json_from_object(uc_vm_t *vm, uc_value_t *obj, json_object **jso)
 
 		/* on EOF, stop parsing unless trailing garbage was detected which handled below */
 		if (eof && !trail) {
-			/* Didn't parse a complete object yet, possibly a non-delimited atomic value
-			   such as `null`, `true` etc. - nudge parser by sending final zero byte.
-			   See json-c issue #681 <https://github.com/json-c/json-c/issues/681> */
-			if (json_tokener_get_error(tok) == json_tokener_continue)
-				*jso = json_tokener_parse_ex(tok, "\0", 1);
+			/* Didn't parse a complete value yet, possibly a non-delimited atomic
+			   value such as `null`, `true` etc. - nudge the parser by sending a
+			   final zero byte, which ends the input. */
+			if (uc_json_parser_error(parser) == UC_JSON_CONTINUE)
+				*val = uc_json_parse(parser, "\0", 1);
 
 			break;
 		}
 
-		if (trail || *jso) {
+		if (trail || *val) {
 			uc_vm_raise_exception(vm, EXCEPTION_SYNTAX,
 			                      "Trailing garbage after JSON data");
 
@@ -3818,74 +3826,73 @@ uc_json_from_object(uc_vm_t *vm, uc_value_t *obj, json_object **jso)
 		}
 
 		if (ucv_type(rbuf) != UC_STRING) {
-			buf = xprintbuf_new();
+			buf = uc_stringbuf_new();
 			ucv_to_stringbuf_formatted(vm, buf, rbuf, 0, '\0', 0);
 
-			*jso = json_tokener_parse_ex(tok, buf->buf, printbuf_length(buf));
+			*val = uc_json_parse(parser, buf->buf, uc_stringbuf_length(buf));
 
-			trail = (json_tokener_get_error(tok) == json_tokener_success &&
-			         json_tokener_get_parse_end(tok) < (size_t)printbuf_length(buf));
+			trail = (uc_json_parser_error(parser) == UC_JSON_SUCCESS &&
+			         uc_json_parser_end(parser) < (size_t)uc_stringbuf_length(buf));
 
-			printbuf_free(buf);
+			uc_stringbuf_free(buf);
 		}
 		else {
-			*jso = json_tokener_parse_ex(tok, ucv_string_get(rbuf), ucv_string_length(rbuf));
+			*val = uc_json_parse(parser, ucv_string_get(rbuf), ucv_string_length(rbuf));
 
-			trail = (json_tokener_get_error(tok) == json_tokener_success &&
-			         json_tokener_get_parse_end(tok) < ucv_string_length(rbuf));
+			trail = (uc_json_parser_error(parser) == UC_JSON_SUCCESS &&
+			         uc_json_parser_end(parser) < ucv_string_length(rbuf));
 		}
 
 		ucv_put(rbuf);
 		rbuf = NULL;
 
-		err = json_tokener_get_error(tok);
+		err = uc_json_parser_error(parser);
 
-		if (err != json_tokener_success && err != json_tokener_continue)
+		if (err != UC_JSON_SUCCESS && err != UC_JSON_CONTINUE)
 			break;
 	}
 
 	goto out;
 
 fail:
-	json_tokener_free(tok);
-	tok = NULL;
+	uc_json_parser_free(parser);
+	parser = NULL;
 
 out:
 	ucv_put(rfn);
 	ucv_put(rbuf);
 
-	return tok;
+	return parser;
 }
 
-static struct json_tokener *
-uc_json_from_string(uc_vm_t *vm, uc_value_t *str, json_object **jso)
+static uc_json_parser_t *
+uc_json_from_string(uc_vm_t *vm, uc_value_t *str, uc_value_t **val)
 {
-	struct json_tokener *tok = xjs_new_tokener();
+	uc_json_parser_t *parser = uc_json_parser_new(vm);
 	size_t i;
 	char *p;
 
-	/* NB: the len + 1 here is intentional to pass the terminating \0 byte
-	 * to the json-c parser. This is required to work-around upstream
-	 * issue #681 <https://github.com/json-c/json-c/issues/681> */
-	*jso = json_tokener_parse_ex(tok, ucv_string_get(str), ucv_string_length(str) + 1);
+	/* NB: the len + 1 here is intentional, the terminating \0 byte ends the
+	 * input, so that values without delimiter such as `null` complete */
+	*val = uc_json_parse(parser, ucv_string_get(str), ucv_string_length(str) + 1);
 
-	if (json_tokener_get_error(tok) == json_tokener_success) {
+	if (uc_json_parser_error(parser) == UC_JSON_SUCCESS) {
 		p = ucv_string_get(str);
 
-		for (i = json_tokener_get_parse_end(tok); i < ucv_string_length(str); i++) {
+		for (i = uc_json_parser_end(parser); i < ucv_string_length(str); i++) {
 			if (!isspace(p[i])) {
 				uc_vm_raise_exception(vm, EXCEPTION_SYNTAX,
 				                      "Trailing garbage after JSON data");
 
 
-				json_tokener_free(tok);
+				uc_json_parser_free(parser);
 
 				return NULL;
 			}
 		}
 	}
 
-	return tok;
+	return parser;
 }
 
 /**
@@ -3929,20 +3936,19 @@ uc_json_from_string(uc_vm_t *vm, uc_value_t *str, json_object **jso)
 static uc_value_t *
 uc_json(uc_vm_t *vm, size_t nargs)
 {
-	uc_value_t *rv = NULL, *src = uc_fn_arg(0);
-	struct json_tokener *tok = NULL;
-	enum json_tokener_error err;
-	json_object *jso = NULL;
+	uc_value_t *rv = NULL, *val = NULL, *src = uc_fn_arg(0);
+	uc_json_parser_t *parser = NULL;
+	uc_json_error_t err;
 
 	switch (ucv_type(src)) {
 	case UC_STRING:
-		tok = uc_json_from_string(vm, src, &jso);
+		parser = uc_json_from_string(vm, src, &val);
 		break;
 
 	case UC_RESOURCE:
 	case UC_OBJECT:
 	case UC_ARRAY:
-		tok = uc_json_from_object(vm, src, &jso);
+		parser = uc_json_from_object(vm, src, &val);
 		break;
 
 	default:
@@ -3950,32 +3956,31 @@ uc_json(uc_vm_t *vm, size_t nargs)
 		                      "Passed value is neither a string nor an object");
 	}
 
-	if (!tok)
+	if (!parser)
 		goto out;
 
-	err = json_tokener_get_error(tok);
+	err = uc_json_parser_error(parser);
 
-	if (err == json_tokener_continue) {
+	if (err == UC_JSON_CONTINUE) {
 		uc_vm_raise_exception(vm, EXCEPTION_SYNTAX,
 		                      "Unexpected end of string in JSON data");
 
 		goto out;
 	}
-	else if (err != json_tokener_success) {
+	else if (err != UC_JSON_SUCCESS) {
 		uc_vm_raise_exception(vm, EXCEPTION_SYNTAX,
 		                      "Failed to parse JSON string: %s",
-		                      json_tokener_error_desc(err));
+		                      uc_json_error_desc(err));
 
 		goto out;
 	}
 
-	rv = ucv_from_json(vm, jso);
+	rv = val;
+	val = NULL;
 
 out:
-	if (tok)
-		json_tokener_free(tok);
-
-	json_object_put(jso);
+	uc_json_parser_free(parser);
+	ucv_put(val);
 
 	return rv;
 }
@@ -4057,8 +4062,8 @@ uc_include_common(uc_vm_t *vm, size_t nargs, bool raw_mode)
 	else if (scope) {
 		sc = ucv_object_new(vm);
 
-		ucv_object_foreach(scope, key, val)
-			ucv_object_add(sc, key, ucv_get(val));
+		ucv_object_foreach_entry(scope, e)
+			ucv_object_insert_string(sc, e->key, ucv_get(e->value));
 
 		ucv_prototype_set(sc, ucv_get(uc_vm_scope_get(vm)));
 	}
@@ -4987,13 +4992,13 @@ uc_b64dec(uc_vm_t *vm, size_t nargs)
 
 	buf = ucv_stringbuf_new();
 	src = ucv_string_get(str);
-	off = printbuf_length(buf);
+	off = uc_stringbuf_length(buf);
 
 	state = BYTE1;
 
 	/* memset the last expected output char to pre-grow the output buffer */
-	if (printbuf_memset(buf, off + ((ucv_string_length(str) + 3) / 4) * 3, 0, 1)) {
-		printbuf_free(buf);
+	if (uc_stringbuf_memset(buf, off + ((ucv_string_length(str) + 3) / 4) * 3, 0, 1)) {
+		uc_stringbuf_free(buf);
 
 		return NULL;
 	}
@@ -5100,7 +5105,7 @@ uc_b64dec(uc_vm_t *vm, size_t nargs)
 	return ucv_stringbuf_finish(buf);
 
 err:
-	printbuf_free(buf);
+	uc_stringbuf_free(buf);
 
 	return NULL;
 }
@@ -5220,7 +5225,7 @@ uc_uniq_ucv_hash(const void *k)
 	}
 
 	while (len > 0) {
-		h = h * 129 + (*u8++) + LH_PRIME;
+		h = h * 129 + (*u8++) + 0x9e370001UL;
 		len--;
 	}
 
@@ -5265,31 +5270,24 @@ static uc_value_t *
 uc_uniq(uc_vm_t *vm, size_t nargs)
 {
 	uc_value_t *list = uc_fn_arg(0);
+	uc_set_t seen = { .hash = uc_uniq_ucv_hash, .equal = uc_uniq_ucv_equal };
 	uc_value_t *uniq = NULL;
-	struct lh_table *seen;
-	unsigned long hash;
 	uc_value_t *item;
 	size_t i, len;
 
 	if (ucv_type(list) != UC_ARRAY)
 		return NULL;
 
-	seen = lh_table_new(16, NULL, uc_uniq_ucv_hash, uc_uniq_ucv_equal);
 	uniq = ucv_array_new(vm);
-
-	assert(seen && uniq);
 
 	for (i = 0, len = ucv_array_length(list); i < len; i++) {
 		item = ucv_array_get(list, i);
-		hash = lh_get_hash(seen, item);
 
-		if (!lh_table_lookup_entry_w_hash(seen, item, hash)) {
-			lh_table_insert_w_hash(seen, item, NULL, hash, 0);
+		if (uc_set_add(&seen, item))
 			ucv_array_push(uniq, ucv_get(item));
-		}
 	}
 
-	lh_table_free(seen);
+	uc_set_free(&seen);
 
 	return uniq;
 }
@@ -5586,14 +5584,14 @@ uc_hexenc(uc_vm_t *vm, size_t nargs)
 		return NULL;
 
 	buf = ucv_stringbuf_new();
-	off = printbuf_length(buf);
+	off = uc_stringbuf_length(buf);
 
 	ucv_to_stringbuf(vm, buf, input, false);
 
-	len = printbuf_length(buf) - off;
+	len = uc_stringbuf_length(buf) - off;
 
 	/* memset the last expected output char to grow the output buffer */
-	printbuf_memset(buf, off + len * 2, 0, 1);
+	uc_stringbuf_memset(buf, off + len * 2, 0, 1);
 
 	/* translate string into hex back to front to reuse the same buffer */
 	while (len > 0) {
@@ -5671,10 +5669,10 @@ uc_hexdec(uc_vm_t *vm, size_t nargs)
 		return NULL;
 
 	buf = ucv_stringbuf_new();
-	off = printbuf_length(buf);
+	off = uc_stringbuf_length(buf);
 
 	/* preallocate the output buffer */
-	printbuf_memset(buf, off, 0, n / 2 + 1);
+	uc_stringbuf_memset(buf, off, 0, n / 2 + 1);
 
 	for (i = 0, n = 0; i < len; i++) {
 		if (!isxdigit(p[i]))
@@ -6096,8 +6094,8 @@ uc_callfunc(uc_vm_t *vm, size_t nargs)
 	else if (scope) {
 		fn_scope = ucv_object_new(vm);
 
-		ucv_object_foreach(scope, k, v)
-			ucv_object_add(fn_scope, k, ucv_get(v));
+		ucv_object_foreach_entry(scope, e)
+			ucv_object_insert_string(fn_scope, e->key, ucv_get(e->value));
 
 		ucv_prototype_set(fn_scope, ucv_get(uc_vm_scope_get(vm)));
 	}

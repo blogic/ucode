@@ -717,8 +717,8 @@ read_exports(uc_source_t *in, uc_source_t *source, uint32_t flags, const char *s
 
 				buf = ucv_stringbuf_new();
 
-				if (printbuf_memset(buf, -1, 0, len + 1)) {
-					printbuf_free(buf);
+				if (uc_stringbuf_memset(buf, -1, 0, len + 1)) {
+					uc_stringbuf_free(buf);
 
 					if (errp)
 						xasprintf(errp, "Out of memory reading %s\n", subjbuf);
@@ -728,7 +728,7 @@ read_exports(uc_source_t *in, uc_source_t *source, uint32_t flags, const char *s
 
 				if (!read_string(in, buf->buf + buf->bpos - len - 1, len, subjbuf, errp))
 				{
-					printbuf_free(buf);
+					uc_stringbuf_free(buf);
 					return false;
 				}
 

@@ -189,7 +189,7 @@ uc_compiler_syntax_error(uc_compiler_t *compiler, size_t off, const char *fmt, .
 	compiler->parser->synchronizing = true;
 
 	if (!buf)
-		buf = compiler->parser->error = xprintbuf_new();
+		buf = compiler->parser->error = uc_stringbuf_new();
 
 	if (!off)
 		off = uc_program_function_srcpos(compiler->function,
@@ -5037,7 +5037,7 @@ uc_compile_from_source(uc_parse_config_t *config, uc_source_t *source, uc_progra
 		free(parser.error);
 	}
 	else {
-		printbuf_free(parser.error);
+		uc_stringbuf_free(parser.error);
 	}
 
 	uc_lexer_free(&parser.lex);

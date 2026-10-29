@@ -24,15 +24,26 @@
 #include "ucode/lib.h"
 #include "ucode/vm.h"
 #include "ucode/internal/cli.h"
-#include "ucode/internal/json-c-compat.h"
+#include "ucode/internal/types.h"
+#include "ucode/json.h"
+
+/* Adds the properties of the object `obj` to `globals` and releases it */
+static void
+uc_cli_define_object(uc_value_t *globals, uc_value_t *obj)
+{
+	ucv_object_foreach_entry(obj, e)
+		ucv_object_insert_string(globals, e->key, ucv_get(e->value));
+
+	ucv_put(obj);
+}
 
 bool
 uc_cli_define_file(char *opt, uc_value_t *globals, FILE **stdin_unused)
 {
-	enum json_tokener_error err = json_tokener_continue;
+	uc_json_error_t err = UC_JSON_CONTINUE;
 	char buf[128], *name = NULL, *p;
-	struct json_tokener *tok;
-	json_object *jso = NULL;
+	uc_json_parser_t *parser;
+	uc_value_t *val = NULL;
 	size_t rlen;
 	FILE *fp;
 
@@ -66,7 +77,7 @@ uc_cli_define_file(char *opt, uc_value_t *globals, FILE **stdin_unused)
 		return true;
 	}
 
-	tok = xjs_new_tokener();
+	parser = uc_json_parser_new(NULL);
 
 	while (true) {
 		rlen = fread(buf, 1, sizeof(buf), fp);
@@ -74,35 +85,30 @@ uc_cli_define_file(char *opt, uc_value_t *globals, FILE **stdin_unused)
 		if (rlen == 0)
 			break;
 
-		jso = json_tokener_parse_ex(tok, buf, rlen);
-		err = json_tokener_get_error(tok);
+		val = uc_json_parse(parser, buf, rlen);
+		err = uc_json_parser_error(parser);
 
-		if (err != json_tokener_continue)
+		if (err != UC_JSON_CONTINUE)
 			break;
 	}
 
-	json_tokener_free(tok);
+	uc_json_parser_free(parser);
 	fclose(fp);
 
-	if (err != json_tokener_success || !json_object_is_type(jso, json_type_object)) {
-		json_object_put(jso);
+	if (err != UC_JSON_SUCCESS || ucv_type(val) != UC_OBJECT) {
+		ucv_put(val);
 
 		fprintf(stderr, "Invalid definition file \"%s\": %s\n",
-		        p, (err != json_tokener_success)
+		        p, (err != UC_JSON_SUCCESS)
 		             ? "JSON parse failure" : "Not a valid JSON object");
 
 		return false;
 	}
 
-	if (name && *name) {
-		ucv_object_add(globals, name, ucv_from_json(NULL, jso));
-	}
-	else {
-		json_object_object_foreach(jso, key, val)
-			ucv_object_add(globals, key, ucv_from_json(NULL, val));
-	}
-
-	json_object_put(jso);
+	if (name && *name)
+		ucv_object_add(globals, name, val);
+	else
+		uc_cli_define_object(globals, val);
 
 	return true;
 }
@@ -110,11 +116,10 @@ uc_cli_define_file(char *opt, uc_value_t *globals, FILE **stdin_unused)
 bool
 uc_cli_define_string(char *opt, uc_value_t *globals)
 {
-	enum json_tokener_error err;
-	struct json_tokener *tok;
-	json_object *jso = NULL;
+	uc_json_parser_t *parser;
 	char *name = NULL, *p;
-	bool rv = false;
+	uc_value_t *val;
+	uc_json_error_t err;
 	size_t len;
 
 	p = strchr(opt, '=');
@@ -128,27 +133,26 @@ uc_cli_define_string(char *opt, uc_value_t *globals)
 	}
 
 	len = strlen(p);
-	tok = xjs_new_tokener();
+	parser = uc_json_parser_new(NULL);
 
-	/* NB: the len + 1 here is intentional to pass the terminating \0 byte
-	 * to the json-c parser. This is required to work-around upstream
-	 * issue #681 <https://github.com/json-c/json-c/issues/681> */
-	jso = json_tokener_parse_ex(tok, p, len + 1);
+	/* NB: the len + 1 here is intentional, the terminating \0 byte ends the
+	 * input, so that values without delimiter such as `null` complete */
+	val = uc_json_parse(parser, p, len + 1);
 
-	err = json_tokener_get_error(tok);
+	err = uc_json_parser_error(parser);
 
 	/* Treat trailing bytes after a parsed value as error */
-	if (err == json_tokener_success && json_tokener_get_parse_end(tok) < len)
-		err = json_tokener_error_parse_unexpected;
+	if (err == UC_JSON_SUCCESS && uc_json_parser_end(parser) < len)
+		err = UC_JSON_ERROR_UNEXPECTED;
 
-	json_tokener_free(tok);
+	uc_json_parser_free(parser);
 
-	if (err != json_tokener_success) {
-		json_object_put(jso);
+	if (err != UC_JSON_SUCCESS) {
+		ucv_put(val);
 
 		if (!name || !*name) {
 			fprintf(stderr, "Invalid -D option value \"%s\": %s\n",
-			        p, json_tokener_error_desc(err));
+			        p, uc_json_error_desc(err));
 
 			return false;
 		}
@@ -159,21 +163,21 @@ uc_cli_define_string(char *opt, uc_value_t *globals)
 	}
 
 	if (name && *name) {
-		ucv_object_add(globals, name, ucv_from_json(NULL, jso));
-		rv = true;
-	}
-	else if (json_object_is_type(jso, json_type_object)) {
-		json_object_object_foreach(jso, key, val)
-			ucv_object_add(globals, key, ucv_from_json(NULL, val));
-		rv = true;
-	}
-	else {
-		fprintf(stderr, "Invalid -D option value \"%s\": Not a valid JSON object\n", p);
+		ucv_object_add(globals, name, val);
+
+		return true;
 	}
 
-	json_object_put(jso);
+	if (ucv_type(val) == UC_OBJECT) {
+		uc_cli_define_object(globals, val);
 
-	return rv;
+		return true;
+	}
+
+	ucv_put(val);
+	fprintf(stderr, "Invalid -D option value \"%s\": Not a valid JSON object\n", p);
+
+	return false;
 }
 
 void
