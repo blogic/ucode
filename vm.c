@@ -128,9 +128,9 @@ static void
 uc_vm_close_upvals(uc_vm_t *vm, size_t slot);
 
 static void
-uc_vm_reset_callframes(uc_vm_t *vm)
+uc_vm_reset_callframes(uc_vm_t *vm, size_t depth)
 {
-	while (vm->callframes.count > 0)
+	while (vm->callframes.count > depth)
 		ucv_put(uc_vm_callframe_pop(vm));
 }
 
@@ -318,7 +318,7 @@ void uc_vm_free(uc_vm_t *vm)
 	for (i = 0; i < vm->restypes.count; i++)
 		ucv_put(vm->restypes.entries[i]->proto);
 
-	uc_vm_reset_callframes(vm);
+	uc_vm_reset_callframes(vm, 0);
 	uc_vm_reset_stack(vm);
 	uc_vector_clear(&vm->stack);
 	uc_vector_clear(&vm->callframes);
@@ -3718,7 +3718,7 @@ exception:
 		if (vm->exception.type != EXCEPTION_NONE) {
 			/* VM termination was requested */
 			if (vm->exception.type == EXCEPTION_EXIT) {
-				uc_vm_reset_callframes(vm);
+				uc_vm_reset_callframes(vm, caller);
 
 				return STATUS_EXIT;
 			}
@@ -3740,7 +3740,7 @@ exception:
 						/* "quit" was issued from within the breakpoint's
 						 * CLI session */
 						if (vm->exception.type == EXCEPTION_EXIT) {
-							uc_vm_reset_callframes(vm);
+							uc_vm_reset_callframes(vm, caller);
 
 							return STATUS_EXIT;
 						}
