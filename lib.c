@@ -3021,14 +3021,73 @@ uc_require_imports(uc_vm_t *vm, uc_value_t *closure)
 	return ns;
 }
 
+static uc_loader_compile_t uc_loader_compile;
+static const uc_loader_units_t *uc_loader_units;
+
+void
+uc_loader_compile_set(uc_loader_compile_t compile)
+{
+	uc_loader_compile = compile;
+}
+
+void
+uc_loader_units_set(const uc_loader_units_t *units)
+{
+	uc_loader_units = units;
+}
+
+char *
+uc_path_normalize(const char *path)
+{
+	char *cwd = NULL, *joined, *res, *seg, *save = NULL, *end;
+
+	if (*path != '/') {
+		cwd = getcwd(NULL, 0);
+
+		if (!cwd)
+			return NULL;
+	}
+
+	xasprintf(&joined, "%s/%s", cwd ? cwd : "", path);
+	free(cwd);
+
+	res = xalloc(strlen(joined) + 2);
+	end = res;
+
+	for (seg = strtok_r(joined, "/", &save); seg; seg = strtok_r(NULL, "/", &save)) {
+		if (!strcmp(seg, "."))
+			continue;
+
+		if (!strcmp(seg, "..")) {
+			while (end > res && *--end != '/')
+				;
+
+			*end = 0;
+			continue;
+		}
+
+		end += sprintf(end, "/%s", seg);
+	}
+
+	if (end == res)
+		strcpy(res, "/");
+
+	free(joined);
+
+	return res;
+}
+
 static bool
 uc_require_ucode(uc_vm_t *vm, const char *path, uc_value_t *scope, uc_value_t **res, bool raw_mode, bool module_mode)
 {
 	uc_parse_config_t config = *vm->config, *prev_config = vm->config;
-	uc_value_t *closure;
+	uc_value_t *closure = NULL;
 	struct stat st;
 
-	if (stat(path, &st))
+	if (uc_loader_units)
+		closure = uc_loader_units->unit_closure(vm, path, raw_mode, module_mode);
+
+	if (!closure && stat(path, &st))
 		return false;
 
 	config.raw_mode = raw_mode;
@@ -3037,7 +3096,8 @@ uc_require_ucode(uc_vm_t *vm, const char *path, uc_value_t *scope, uc_value_t **
 
 	uc_vm_stack_push(vm, ucv_string_new(path));
 
-	closure = uc_loadfile(vm, 1);
+	if (!closure)
+		closure = uc_loadfile(vm, 1);
 
 	/* the module body runs with this configuration; a file that it loads is
 	 * not a module */
@@ -3068,25 +3128,16 @@ uc_require_ucode(uc_vm_t *vm, const char *path, uc_value_t *scope, uc_value_t **
 	return true;
 }
 
-static bool
-uc_require_path(uc_vm_t *vm, const char *path_template, const char *name,
-                uc_value_t **res, bool module_mode)
+const char *
+uc_require_path_expand(const char *path_template, const char *name,
+                       uc_stringbuf_t *buf)
 {
-	uc_stringbuf_t *buf = uc_stringbuf_new();
 	const char *p, *q, *last;
-	uc_value_t *modtable;
-	bool rv;
-
-	modtable = ucv_property_get(uc_vm_scope_get(vm), "modules");
-	*res = ucv_get(ucv_object_get(modtable, name, &rv));
-
-	if (rv)
-		goto out;
 
 	p = strchr(path_template, '*');
 
 	if (!p)
-		goto out;
+		return NULL;
 
 	ucv_stringbuf_addstr(buf, path_template, p - path_template);
 
@@ -3105,13 +3156,36 @@ uc_require_path(uc_vm_t *vm, const char *path_template, const char *name,
 			last = q + 1;
 		}
 		else if (!isalnum(*q) && *q != '_') {
-			goto out;
+			return NULL;
 		}
 	}
 
-	if (!strcmp(p + 1, ".so"))
+	return p + 1;
+}
+
+static bool
+uc_require_path(uc_vm_t *vm, const char *path_template, const char *name,
+                uc_value_t **res, bool module_mode)
+{
+	uc_stringbuf_t *buf = uc_stringbuf_new();
+	uc_value_t *modtable;
+	const char *ext;
+	bool rv;
+
+	modtable = ucv_property_get(uc_vm_scope_get(vm), "modules");
+	*res = ucv_get(ucv_object_get(modtable, name, &rv));
+
+	if (rv)
+		goto out;
+
+	ext = uc_require_path_expand(path_template, name, buf);
+
+	if (!ext)
+		goto out;
+
+	if (!strcmp(ext, ".so"))
 		rv = uc_require_so(vm, buf->buf, res);
-	else if (!strcmp(p + 1, ".uc"))
+	else if (!strcmp(ext, ".uc"))
 		rv = uc_require_ucode(vm, buf->buf, NULL, res, true, module_mode);
 
 	if (rv && vm->exception.type == EXCEPTION_NONE)
@@ -3985,27 +4059,28 @@ out:
 	return rv;
 }
 
-static char *
-include_path(const char *curpath, const char *incpath)
+char *
+uc_include_path(const char *curpath, const char *incpath)
 {
 	const char *slash;
 	char *dup, *res;
-	int len;
 
-	if (*incpath == '/')
-		return realpath(incpath, NULL);
+	if (*incpath == '/') {
+		res = xstrdup(incpath);
+	}
+	else {
+		slash = curpath ? strrchr(curpath, '/') : NULL;
 
-	slash = curpath ? strrchr(curpath, '/') : NULL;
-
-	if (slash)
-		len = asprintf(&res, "%.*s/%s", (int)(slash - curpath), curpath, incpath);
-	else
-		len = asprintf(&res, "./%s", incpath);
-
-	if (len == -1)
-		return NULL;
+		if (slash)
+			xasprintf(&res, "%.*s/%s", (int)(slash - curpath), curpath, incpath);
+		else
+			xasprintf(&res, "./%s", incpath);
+	}
 
 	dup = realpath(res, NULL);
+
+	if (!dup && uc_loader_units)
+		dup = uc_loader_units->unit_path(res);
 
 	free(res);
 
@@ -4047,7 +4122,7 @@ uc_include_common(uc_vm_t *vm, size_t nargs, bool raw_mode)
 	if (!closure)
 		return NULL;
 
-	p = include_path(uc_program_function_source(closure->function)->runpath, ucv_string_get(path));
+	p = uc_include_path(uc_program_function_source(closure->function)->runpath, ucv_string_get(path));
 
 	if (!p) {
 		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME,
@@ -4800,6 +4875,10 @@ uc_sourcepath(uc_vm_t *vm, size_t nargs)
 		}
 
 		path = realpath(uc_program_function_source(frame->closure->function)->runpath, NULL);
+
+		if (!path && uc_loader_units)
+			path = uc_loader_units->source_path(uc_program_function_source(frame->closure->function)->runpath);
+
 		break;
 	}
 
@@ -5860,7 +5939,14 @@ uc_load_common(uc_vm_t *vm, size_t nargs, uc_source_t *source, bool is_file)
 
 	uc_compile_parse_config(&conf, uc_fn_arg(1));
 
-	program = uc_compile(&conf, source, &err);
+	if (uc_loader_compile) {
+		program = uc_loader_compile(&conf, source, &err);
+	}
+	else {
+		program = NULL;
+		xasprintf(&err, "Source code compilation not supported\n");
+	}
+
 	closure = program ? uc_program_main(vm, program) : NULL;
 
 	uc_program_put(program);

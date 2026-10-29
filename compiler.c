@@ -5108,3 +5108,9 @@ uc_compile(uc_parse_config_t *config, uc_source_t *source, char **errp)
 
 	return prog;
 }
+
+static void __attribute__((constructor))
+uc_compiler_register(void)
+{
+	uc_loader_compile_set(uc_compile);
+}

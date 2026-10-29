@@ -3478,6 +3478,9 @@ ucv_gc_common(uc_vm_t *vm, bool final)
 		for (i = 0; i < vm->stack.count; i++)
 			ucv_gc_mark(vm->stack.entries[i]);
 
+		if (uc_thread_context_get()->gc_roots_mark)
+			uc_thread_context_get()->gc_roots_mark(vm, ucv_gc_mark);
+
 		for (i = 0; i < vm->restypes.count; i++)
 			ucv_gc_mark(vm->restypes.entries[i]->proto);
 

@@ -102,6 +102,9 @@ struct uc_function {
 	size_t srcpos;
 	uc_chunk_t chunk;
 	struct uc_program *program;
+	/* the native code of a function of a native program, which has no
+	 * bytecode */
+	struct uc_native_function_info *native;
 	char name[];
 };
 
@@ -158,6 +161,10 @@ typedef struct {
 
 	/* Object iteration */
 	uc_list_t object_iterators;
+
+	/* Marks the values that a runtime holds outside of the VM state, such
+	 * as the locals of native code */
+	void (*gc_roots_mark)(uc_vm_t *vm, void (*mark)(uc_value_t *));
 } uc_thread_context_t;
 
 __hidden uc_thread_context_t *uc_thread_context_get(void);
