@@ -125,6 +125,7 @@ typedef struct {
 	size_t count;
 	uc_value_t *proto;
 	uc_value_t **entries;
+	size_t capacity;
 } uc_array_t;
 
 /* `key` is a string value, NULL in place of a deleted entry */

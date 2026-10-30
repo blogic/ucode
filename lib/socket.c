@@ -2868,7 +2868,7 @@ uc_socket_addrinfo(uc_vm_t *vm, size_t nargs)
 static uc_value_t *
 uc_socket_poll(uc_vm_t *vm, size_t nargs)
 {
-	struct { struct pollfd *entries; size_t count; } pfds = { 0 };
+	struct { struct pollfd *entries; size_t count, capacity; } pfds = { 0 };
 	uc_value_t *timeoutarg, *rv, *item;
 	int64_t timeout;
 	int ret;
@@ -2984,8 +2984,8 @@ uc_socket_connect(uc_vm_t *vm, size_t nargs)
 		int fd;
 	} *ap;
 
-	struct { struct address *entries; size_t count; } addresses = { 0 };
-	struct { struct pollfd *entries; size_t count; } pollfds = { 0 };
+	struct { struct address *entries; size_t count, capacity; } addresses = { 0 };
+	struct { struct pollfd *entries; size_t count, capacity; } pollfds = { 0 };
 	struct addrinfo *ai_results, *ai_hints, *ai;
 	uc_value_t *host, *serv, *hints, *timeout;
 	const char *errmsg = NULL;
@@ -3998,7 +3998,7 @@ estimate_cmsg_size(uc_value_t *uv)
 static bool
 encode_cmsg(uc_vm_t *vm, uc_value_t *uv, struct cmsghdr *cmsg)
 {
-	struct { int *entries; size_t count; } fds = { 0 };
+	struct { int *entries; size_t count, capacity; } fds = { 0 };
 	void *dataptr = NULL;
 	socklen_t datasz = 0;
 	char *st = NULL;

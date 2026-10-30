@@ -66,7 +66,7 @@ typedef struct CPState {
   uc_value_t *uv_str;
   uc_value_t **uv_param;
   char *error;
-  struct cp_func_ids_buf { size_t count; CTypeID *entries; } func_ids_buf;  /* Optional buffer to collect function type IDs */
+  struct cp_func_ids_buf { size_t count; CTypeID *entries; size_t capacity; } func_ids_buf;  /* Optional buffer to collect function type IDs */
   struct cp_func_ids_buf *func_ids;     /* Pointer to func_ids_buf or external buffer */
 } CPState;
 

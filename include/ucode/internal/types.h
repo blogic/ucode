@@ -54,6 +54,7 @@ struct uc_source {
 	struct {
 		size_t count, offset;
 		uc_value_t **entries;
+		size_t capacity;
 	} exports;
 };
 
@@ -80,6 +81,7 @@ uc_declare_vector(uc_offsetinfo_t, uc_offset_t);
 typedef struct {
 	size_t count;
 	uint8_t *entries;
+	size_t capacity;
 	uc_ehranges_t ehranges;
 	struct {
 		uc_variables_t variables;

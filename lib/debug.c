@@ -2670,7 +2670,7 @@ lookup_stmt_boundary(uc_vm_t *vm, location_t *loc, insn_span_t *sp)
 	if (!lookup_function(vm, loc))
 		return false;
 
-	struct { insn_span_t *entries; size_t count; } sp_stack = { 0 };
+	struct { insn_span_t *entries; size_t count, capacity; } sp_stack = { 0 };
 	uc_chunk_t *chunk = &loc->function->chunk;
 	uc_offsetinfo_t *offsets = &chunk->debuginfo.offsets;
 	size_t bytes = loc->function->srcpos;
@@ -2762,7 +2762,7 @@ next_parent(uc_vm_t *vm, uc_function_t **fnp)
 static bool
 find_statement_boundaries(uc_function_t *fn, uint8_t *ip, size_t depth, insn_span_t *sp)
 {
-	struct { insn_span_t *entries; size_t count; } sp_stack = { 0 };
+	struct { insn_span_t *entries; size_t count, capacity; } sp_stack = { 0 };
 	uc_offsetinfo_t *offsets = &fn->chunk.debuginfo.offsets;
 	size_t off = ip - fn->chunk.entries;
 	size_t i = 0, bytes = 0, insns = 0;
