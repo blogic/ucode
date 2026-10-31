@@ -69,8 +69,29 @@ size_t uc_program_function_srcpos(uc_function_t *, size_t);
 __hidden bool uc_program_function_stmt_bounds(uc_function_t *, size_t, size_t *, size_t *);
 __hidden void uc_program_function_free(uc_function_t *);
 
+__hidden uc_value_t *uc_program_constant_load(uc_program_t *, size_t);
+__hidden uint64_t uc_program_constant_hash_load(uc_program_t *, size_t);
 __hidden uc_value_t *uc_program_get_constant(uc_program_t *, size_t);
-__hidden uint64_t uc_program_get_constant_hash(uc_program_t *, size_t);
+
+/* The value of constant `idx`, which the program keeps the reference to */
+static inline uc_value_t *
+uc_program_peek_constant(uc_program_t *prog, size_t idx)
+{
+	if (idx < prog->constant_values.count && prog->constant_values.entries[idx])
+		return prog->constant_values.entries[idx];
+
+	return uc_program_constant_load(prog, idx);
+}
+
+/* The hash of the string constant `idx` as an object key */
+static inline uint64_t
+uc_program_get_constant_hash(uc_program_t *prog, size_t idx)
+{
+	if (idx < prog->constant_hashes.count && prog->constant_hashes.entries[idx])
+		return prog->constant_hashes.entries[idx];
+
+	return uc_program_constant_hash_load(prog, idx);
+}
 __hidden ssize_t uc_program_add_constant(uc_program_t *, uc_value_t *);
 
 #endif /* UCODE_INTERNAL_PROGRAM_H */

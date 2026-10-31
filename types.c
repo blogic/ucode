@@ -1257,6 +1257,9 @@ ucv_object_find(uc_object_t *object, const char *s, size_t len, uc_value_t *kv)
 uint64_t
 ucv_object_key_hash(uc_value_t *key)
 {
+	if (ucv_type(key) != UC_STRING)
+		return 0;
+
 	return ucv_object_hash_bytes(_ucv_string_get(&key), ucv_string_length(key));
 }
 
@@ -1529,19 +1532,27 @@ ucv_object_delete(uc_value_t *uv, const char *key)
 	return ucv_object_remove(uv, key, strlen(key));
 }
 
-/* Looks up the key `s` of `len` bytes, with its string value `kv` if given */
+/* Looks up the key `s` of `len` bytes, with its string value `kv` and its
+ * hash if given */
 static uc_value_t *
-ucv_object_lookup_key(uc_value_t *uv, const char *s, size_t len, uc_value_t *kv, bool *found)
+ucv_object_lookup_key_hashed(uc_value_t *uv, const char *s, size_t len, uc_value_t *kv,
+                             const uint64_t *hash, bool *found)
 {
 	uc_object_entry_t *e = NULL;
 
 	if (ucv_type(uv) == UC_OBJECT)
-		e = ucv_object_find(ucv_as_object(uv), s, len, kv);
+		e = ucv_object_find_hashed(ucv_as_object(uv), s, len, kv, hash);
 
 	if (found != NULL)
 		*found = (e != NULL);
 
 	return e ? e->value : NULL;
+}
+
+static uc_value_t *
+ucv_object_lookup_key(uc_value_t *uv, const char *s, size_t len, uc_value_t *kv, bool *found)
+{
+	return ucv_object_lookup_key_hashed(uv, s, len, kv, NULL, found);
 }
 
 uc_value_t *
@@ -1554,6 +1565,13 @@ uc_value_t *
 ucv_object_lookup_string(uc_value_t *uv, uc_value_t *key, bool *found)
 {
 	return ucv_object_lookup_key(uv, ucv_string_get(key), ucv_string_length(key), key, found);
+}
+
+uc_value_t *
+ucv_object_lookup_hashed(uc_value_t *uv, uc_value_t *key, uint64_t hash, bool *found)
+{
+	return ucv_object_lookup_key_hashed(uv, ucv_string_get(key), ucv_string_length(key), key,
+	                                    &hash, found);
 }
 
 uc_value_t *

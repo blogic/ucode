@@ -49,10 +49,17 @@ uc_native_ref(uc_value_t *v)
 	return ucv_is_counted(v) ? ucv_get(v) : v;
 }
 
+/* The closure of the frame keeps the program and so its constants alive */
 UC_NATIVE_INLINE static uc_value_t *
 uc_native_constant(uc_native_frame_t *f, size_t idx)
 {
-	return uc_program_get_constant(f->closure->function->program, idx);
+	return uc_program_peek_constant(f->closure->function->program, idx);
+}
+
+UC_NATIVE_INLINE static uint64_t
+uc_native_constant_hash(uc_native_frame_t *f, size_t idx)
+{
+	return uc_program_get_constant_hash(f->closure->function->program, idx);
 }
 
 UC_NATIVE_INLINE static bool
@@ -97,7 +104,7 @@ uc_native_upval_store(uc_vm_t *vm, uc_upvalref_t *ref, uc_value_t *val)
 UC_NATIVE_INLINE static void
 uc_native_insn_load(uc_vm_t *vm, uc_native_frame_t *f, int32_t d, uint32_t arg)
 {
-	uc_native_store(vm, f, d, uc_native_constant(f, arg));
+	uc_native_store(vm, f, d, uc_native_ref(uc_native_constant(f, arg)));
 }
 
 UC_NATIVE_INLINE static void
@@ -226,7 +233,6 @@ uc_native_lrexp(UC_NATIVE_INSN_ARGS)
 
 	uc_native_pc_set(vm, pc);
 	loaded = uc_vm_regexp_load(vm, jstr, &re);
-	ucv_put(jstr);
 
 	if (loaded)
 		uc_native_store(vm, f, d, re);
@@ -240,13 +246,13 @@ uc_native_lnull(UC_NATIVE_INSN_ARGS)
 	uc_native_slot_set(f, d, NULL);
 }
 
-void
+UC_NATIVE_NOINLINE void
 uc_native_ltrue(UC_NATIVE_INSN_ARGS)
 {
 	uc_native_slot_set(f, d, ucv_boolean_new(true));
 }
 
-void
+UC_NATIVE_NOINLINE void
 uc_native_lfalse(UC_NATIVE_INSN_ARGS)
 {
 	uc_native_slot_set(f, d, ucv_boolean_new(false));
@@ -276,8 +282,7 @@ uc_native_lvar(UC_NATIVE_INSN_ARGS)
 	uc_value_t *val;
 
 	uc_native_pc_set(vm, pc);
-	val = uc_vm_global_get(vm, name, uc_native_strict(f));
-	ucv_put(name);
+	val = uc_vm_global_get(vm, name, uc_native_constant_hash(f, arg), uc_native_strict(f));
 	uc_native_store(vm, f, d, val);
 
 	return uc_native_ok(vm);
@@ -324,7 +329,7 @@ uc_native_closure(uc_vm_t *vm, uc_native_frame_t *f, int32_t d, uint32_t arg,
 	}
 }
 
-void
+UC_NATIVE_NOINLINE void
 uc_native_clfn(UC_NATIVE_INSN_ARGS)
 {
 	uc_vm_t *vm = f->vm;
@@ -332,7 +337,7 @@ uc_native_clfn(UC_NATIVE_INSN_ARGS)
 	uc_native_closure(vm, f, d, arg, x, false);
 }
 
-void
+UC_NATIVE_NOINLINE void
 uc_native_arfn(UC_NATIVE_INSN_ARGS)
 {
 	uc_vm_t *vm = f->vm;
@@ -362,8 +367,8 @@ uc_native_svar(UC_NATIVE_INSN_ARGS)
 	bool stored;
 
 	uc_native_pc_set(vm, pc);
-	stored = uc_vm_global_set(vm, name, SLOT(d - 1), uc_native_strict(f));
-	ucv_put(name);
+	stored = uc_vm_global_set(vm, name, uc_native_constant_hash(f, arg), SLOT(d - 1),
+	                          uc_native_strict(f));
 
 	if (!stored)
 		uc_native_slot_clear(f, d - 1);
@@ -429,8 +434,8 @@ uc_native_uvar(UC_NATIVE_INSN_ARGS)
 	bool ok;
 
 	uc_native_pc_set(vm, pc);
-	ok = uc_vm_global_update(vm, arg >> 24, name, SLOT(d - 1), uc_native_strict(f), &val);
-	ucv_put(name);
+	ok = uc_vm_global_update(vm, arg >> 24, name, uc_native_constant_hash(f, arg & 0x00ffffff),
+	                         SLOT(d - 1), uc_native_strict(f), &val);
 	uc_native_slot_clear(f, d - 1);
 
 	if (ok)
@@ -687,7 +692,7 @@ uc_native_comparison(uc_vm_t *vm, uc_native_frame_t *f, uint32_t pc, int32_t d,
 	{ return uc_native_binary(f->vm, f, pc, d, uc_vm_value_bitop, insn); }
 
 #define UC_NATIVE_COMPARE(name, insn) \
-	bool uc_native_##name(UC_NATIVE_INSN_ARGS) \
+	UC_NATIVE_NOINLINE bool uc_native_##name(UC_NATIVE_INSN_ARGS) \
 	{ return uc_native_comparison(f->vm, f, pc, d, insn); }
 
 /* the order comparisons of loop conditions are inlined; equality is mostly
@@ -802,14 +807,15 @@ uc_native_cupv(UC_NATIVE_INSN_ARGS)
 	uc_native_slot_clear(f, d - 1);
 }
 
-void
+UC_NATIVE_NOINLINE void
 uc_native_return(UC_NATIVE_INSN_ARGS)
 {
 	ucv_put(f->result);
 	f->result = uc_native_slot_take(f, d - 1);
+	uc_native_frame_release(f, d - 1);
 }
 
-/* Pushes the callee of a CALL, its receiver for a method call and its
+/* Moves the callee of a CALL, its receiver for a method call and its
  * arguments, expanding spread arguments, onto the VM stack in the layout that
  * uc_vm_call_function() builds. Returns the number of arguments, or -1 if a
  * spread argument is not an array. */
@@ -822,13 +828,13 @@ uc_native_call_push(uc_vm_t *vm, uc_native_frame_t *f, int32_t d, uint32_t arg,
 	int32_t fi = d - nargs - 1;
 
 	if (mcall)
-		uc_vm_stack_push(vm, ucv_get(SLOT(fi - 1)));
+		uc_vm_stack_push(vm, uc_native_slot_take(f, fi - 1));
 
 	*stackoff = vm->stack.count;
-	uc_vm_stack_push(vm, ucv_get(SLOT(fi)));
+	uc_vm_stack_push(vm, uc_native_slot_take(f, fi));
 
 	for (i = 0; i < nargs; i++)
-		uc_vm_stack_push(vm, ucv_get(SLOT(fi + 1 + i)));
+		uc_vm_stack_push(vm, uc_native_slot_take(f, fi + 1 + i));
 
 	if (!nspreads)
 		return nargs;
@@ -966,19 +972,24 @@ uc_native_call_direct(uc_vm_t *vm, uc_native_frame_t *f, int32_t d, uint32_t arg
 	bool mcall = arg & 0x80000000;
 	size_t nargs = arg & 0xffff, i;
 	int32_t fi = d - nargs - 1, s;
-	uc_value_t *buf[16], **args = buf, *ctx, *res;
-
-	if (nargs > ARRAY_SIZE(buf))
-		args = xalloc(nargs * sizeof(*args));
+	/* without cells, the slots of the arguments serve as the array, which
+	 * the callee clears */
+	bool in_slots = !f->captured;
+	uc_value_t *buf[16], **args = in_slots ? &f->slots[fi + 1] : buf, *ctx, *res;
 
 	ctx = uc_native_call_ctx(f, d, arg);
 
-	for (i = 0; i < nargs; i++)
-		args[i] = uc_native_slot_take(f, fi + 1 + i);
+	if (!in_slots) {
+		if (nargs > ARRAY_SIZE(buf))
+			args = xalloc(nargs * sizeof(*args));
+
+		for (i = 0; i < nargs; i++)
+			args[i] = uc_native_slot_take(f, fi + 1 + i);
+	}
 
 	res = uc_native_invoke(vm, ucv_as_closure(SLOT(fi)), ctx, mcall, args, nargs);
 
-	if (args != buf)
+	if (!in_slots && args != buf)
 		free(args);
 
 	for (s = d - 1; s >= fi - (int32_t)mcall; s--)
@@ -1069,7 +1080,7 @@ uc_native_stcall(UC_NATIVE_INSN_ARGS)
 	uc_native_pc_set(vm, pc);
 
 	for (size_t i = 0; i < nargs; i++)
-		uc_vm_stack_push(vm, ucv_get(SLOT(base + i)));
+		uc_vm_stack_push(vm, uc_native_slot_take(f, base + i));
 
 	uc_vm_stcall(vm, arg >> 16, nargs);
 
@@ -1234,27 +1245,16 @@ uc_native_dynload(UC_NATIVE_INSN_ARGS)
 static bool
 uc_native_getk_own(uc_vm_t *vm, uc_native_frame_t *f, int32_t d, uint32_t arg)
 {
-	uc_program_t *prog = f->closure->function->program;
 	uint32_t k = arg & 0x00ffffff;
 	uc_value_t *key, *res;
-	bool found;
 
 	if (ucv_type(SLOT(d - 1)) != UC_OBJECT)
 		return false;
 
-	key = uc_program_get_constant(prog, k);
+	key = uc_native_constant(f, k);
 
-	if (ucv_type(key) != UC_STRING) {
-		ucv_put(key);
-
-		return false;
-	}
-
-	found = ucv_key_get_hashed(vm, SLOT(d - 1), key,
-	                           uc_program_get_constant_hash(prog, k), &res);
-	ucv_put(key);
-
-	if (!found)
+	if (ucv_type(key) != UC_STRING ||
+	    !ucv_key_get_hashed(vm, SLOT(d - 1), key, uc_native_constant_hash(f, k), &res))
 		return false;
 
 	if (arg & UC_NATIVE_GETK_KEEP) {
@@ -1321,6 +1321,47 @@ uc_native_callpop(UC_NATIVE_INSN_ARGS)
 	return true;
 }
 
+/* LLOC of the slot in UC_NATIVE_LCALL_SLOT of `arg`, then CALL without
+ * spread arguments */
+bool
+uc_native_lcall(UC_NATIVE_INSN_ARGS)
+{
+	uc_vm_t *vm = f->vm;
+
+	uc_native_insn_lloc(vm, f, d, (arg & UC_NATIVE_LCALL_SLOT) >> 16);
+
+	return uc_native_call_common(vm, f, pc, d + 1, arg & ~UC_NATIVE_LCALL_SLOT, x, false);
+}
+
+/* LLOC, then CALL as uc_native_lcall(), then POP of its result */
+bool
+uc_native_lcallpop(UC_NATIVE_INSN_ARGS)
+{
+	uc_vm_t *vm = f->vm;
+
+	if (!uc_native_lcall(f, pc, d, arg, x))
+		return false;
+
+	uc_native_insn_pop(vm, f, d + 1 - (arg & 0xffff) - (arg >> 31));
+
+	return true;
+}
+
+/* COPY, then JMPZ, which test the value `arg` slots below the top without
+ * taking it, then POP if UC_NATIVE_COPYJMPZ_POP is set and the branch is
+ * not taken; returns whether the branch is taken. */
+bool
+uc_native_copyjmpz(UC_NATIVE_INSN_ARGS)
+{
+	uc_vm_t *vm = f->vm;
+	bool falsy = !ucv_is_truish(SLOT(d - 1 - (arg & ~UC_NATIVE_COPYJMPZ_POP)));
+
+	if (!falsy && (arg & UC_NATIVE_COPYJMPZ_POP))
+		uc_native_insn_pop(vm, f, d);
+
+	return falsy;
+}
+
 /* SLOC, then POP */
 void
 uc_native_slocpop(UC_NATIVE_INSN_ARGS)
@@ -1329,6 +1370,36 @@ uc_native_slocpop(UC_NATIVE_INSN_ARGS)
 
 	uc_native_insn_sloc(f, d, arg);
 	uc_native_insn_pop(vm, f, d);
+}
+
+UC_NATIVE_INLINE static void
+uc_native_load_kind(uc_vm_t *vm, uc_native_frame_t *f, int32_t d, uint32_t op)
+{
+	uint32_t idx = op & UC_NATIVE_LOAD2_INDEX;
+
+	switch (op >> UC_NATIVE_LOAD2_KIND_SHIFT) {
+	case UC_NATIVE_LOAD2_LLOC:
+		uc_native_insn_lloc(vm, f, d, idx);
+		break;
+
+	case UC_NATIVE_LOAD2_LUPV:
+		uc_native_insn_lupv(vm, f, d, idx);
+		break;
+
+	default:
+		uc_native_insn_load(vm, f, d, idx);
+		break;
+	}
+}
+
+/* Two of LLOC, LUPV and LOAD, the first in the low 16 bits of `arg` */
+void
+uc_native_load2(UC_NATIVE_INSN_ARGS)
+{
+	uc_vm_t *vm = f->vm;
+
+	uc_native_load_kind(vm, f, d, arg & 0xffff);
+	uc_native_load_kind(vm, f, d + 1, arg >> 16);
 }
 
 /* LNULL, which has the empty slot `d` to push to, then EQS, or NES if `arg`

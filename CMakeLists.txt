@@ -284,10 +284,18 @@ if(LLVM_SUPPORT AND NOT UCODE_WASM)
                                       llvm-link-18 llvm-link-17 llvm-link-16)
   find_program(NATIVE_LLVM_DIS NAMES llvm-dis llvm-dis-21 llvm-dis-20 llvm-dis-19
                                      llvm-dis-18 llvm-dis-17 llvm-dis-16)
+  find_program(NATIVE_LLVM_AS NAMES llvm-as llvm-as-21 llvm-as-20 llvm-as-19
+                                    llvm-as-18 llvm-as-17 llvm-as-16)
   set(NATIVE_TARGET "" CACHE STRING "Target triple of the runtime bitcode, empty for the host")
+  # The triple does not select the CPU or the float ABI of a target, such as
+  # the soft float of OpenWrt mips_24kc. The runtime bitcode keeps no target
+  # attributes (see cmake/native-strip.cmake), so a program build passes the
+  # same flags to clang when it compiles the linked program bitcode.
+  set(NATIVE_TARGET_FLAGS "" CACHE STRING
+    "Target CPU and ABI flags of the runtime bitcode in clang syntax, e.g. -march=mips32r2 -msoft-float")
 
-  if(NOT NATIVE_CLANG OR NOT NATIVE_LLVM_LINK OR NOT NATIVE_LLVM_DIS)
-    message(FATAL_ERROR "LLVM_SUPPORT requires clang, llvm-link and llvm-dis")
+  if(NOT NATIVE_CLANG OR NOT NATIVE_LLVM_LINK OR NOT NATIVE_LLVM_DIS OR NOT NATIVE_LLVM_AS)
+    message(FATAL_ERROR "LLVM_SUPPORT requires clang, llvm-link, llvm-dis and llvm-as")
   endif()
 
   set(native_bc_flags -O2 -std=gnu99 -fPIE -emit-llvm -c
@@ -297,6 +305,11 @@ if(LLVM_SUPPORT AND NOT UCODE_WASM)
 
   if(NATIVE_TARGET)
     list(APPEND native_bc_flags --target=${NATIVE_TARGET})
+  endif()
+
+  if(NATIVE_TARGET_FLAGS)
+    separate_arguments(native_target_flags UNIX_COMMAND "${NATIVE_TARGET_FLAGS}")
+    list(APPEND native_bc_flags ${native_target_flags})
   endif()
 
   if(CMAKE_SYSROOT)
@@ -338,21 +351,28 @@ if(LLVM_SUPPORT AND NOT UCODE_WASM)
   endforeach()
 
   add_custom_command(
-    OUTPUT ${CMAKE_BINARY_DIR}/libucode-native.bc
-    COMMAND ${NATIVE_LLVM_LINK} ${native_bc_files} -o ${CMAKE_BINARY_DIR}/libucode-native.bc
-    DEPENDS ${native_bc_files}
+    OUTPUT ${CMAKE_BINARY_DIR}/libucode-native.bc ${CMAKE_BINARY_DIR}/native-bc/libucode-native.ll
+    COMMAND ${NATIVE_LLVM_LINK} ${native_bc_files}
+            -o ${CMAKE_BINARY_DIR}/native-bc/linked.bc
+    COMMAND ${NATIVE_LLVM_DIS} ${CMAKE_BINARY_DIR}/native-bc/linked.bc
+            -o ${CMAKE_BINARY_DIR}/native-bc/linked.ll
+    COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_BINARY_DIR}/native-bc/linked.ll
+            -DOUTPUT=${CMAKE_BINARY_DIR}/native-bc/libucode-native.ll
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/native-strip.cmake
+    COMMAND ${NATIVE_LLVM_AS} ${CMAKE_BINARY_DIR}/native-bc/libucode-native.ll
+            -o ${CMAKE_BINARY_DIR}/libucode-native.bc
+    DEPENDS ${native_bc_files} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/native-strip.cmake
     VERBATIM)
 
   # the symbols to keep when the program is linked with opt's internalize
   # pass: -internalize-public-api-file=libucode-native.api
   add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/libucode-native.api
-    COMMAND ${NATIVE_LLVM_DIS} ${CMAKE_BINARY_DIR}/libucode-native.bc
-            -o ${CMAKE_BINARY_DIR}/native-bc/libucode-native.ll
     COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_BINARY_DIR}/native-bc/libucode-native.ll
             -DOUTPUT=${CMAKE_BINARY_DIR}/libucode-native.api
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/native-api.cmake
-    DEPENDS ${CMAKE_BINARY_DIR}/libucode-native.bc ${CMAKE_CURRENT_SOURCE_DIR}/cmake/native-api.cmake
+    DEPENDS ${CMAKE_BINARY_DIR}/native-bc/libucode-native.ll
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/native-api.cmake
     VERBATIM)
 
   add_custom_target(ucode-native ALL

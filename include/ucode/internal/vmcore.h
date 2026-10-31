@@ -81,8 +81,32 @@ __hidden void uc_vm_stack_set(uc_vm_t *vm, size_t offset, uc_value_t *value);
 __hidden void uc_vm_call_native(uc_vm_t *vm, uc_value_t *ctx, uc_cfunction_t *fptr, bool mcall, size_t nargs);
 __hidden uc_value_t *uc_vm_callframe_pop(uc_vm_t *vm);
 
-__hidden void uc_vm_run_begin(uc_closure_t *closure, bool keep);
-__hidden void uc_vm_run_end(uc_closure_t *closure);
+/* The exports of the modules that a program links statically belong to the
+ * closure of its entry function that runs them, and live as long as that
+ * closure. An exported function holds the program, so exports that the program
+ * owned itself would keep the program alive. Inline, as each call of a
+ * native function begins and ends a run. */
+static inline bool
+uc_vm_closure_is_entry(uc_closure_t *closure)
+{
+	uc_function_t *function = closure->function;
+
+	return function->program->functions.prev == &function->progref;
+}
+
+static inline void
+uc_vm_run_begin(uc_closure_t *closure, bool keep)
+{
+	if (uc_vm_closure_is_entry(closure))
+		uc_vector_push(&closure->function->program->runs, { .closure = closure, .keep = keep });
+}
+
+static inline void
+uc_vm_run_end(uc_closure_t *closure)
+{
+	if (uc_vm_closure_is_entry(closure))
+		uc_vector_pop(&closure->function->program->runs);
+}
 
 __hidden char *uc_vm_callee_expr(uc_vm_t *vm);
 __hidden void uc_vm_clear_exception(uc_vm_t *vm);
@@ -118,10 +142,12 @@ __hidden bool uc_vm_object_spread(uc_vm_t *vm, uc_value_t *dst, uc_value_t *src)
 __hidden bool uc_vm_spread_push(uc_vm_t *vm, size_t base, size_t nargs, size_t from, size_t spread);
 __hidden void uc_vm_spread_finish(uc_vm_t *vm, size_t base, size_t nargs, size_t from);
 
-__hidden uc_value_t *uc_vm_global_get(uc_vm_t *vm, uc_value_t *name, bool strict);
-__hidden bool uc_vm_global_set(uc_vm_t *vm, uc_value_t *name, uc_value_t *v, bool strict);
+/* `hash` is the object key hash of `name`, see uc_program_get_constant_hash() */
+__hidden uc_value_t *uc_vm_global_get(uc_vm_t *vm, uc_value_t *name, uint64_t hash, bool strict);
+__hidden bool uc_vm_global_set(uc_vm_t *vm, uc_value_t *name, uint64_t hash, uc_value_t *v,
+                               bool strict);
 __hidden bool uc_vm_global_update(uc_vm_t *vm, uc_vm_insn_t operation, uc_value_t *name,
-                                  uc_value_t *inc, bool strict, uc_value_t **res);
+                                  uint64_t hash, uc_value_t *inc, bool strict, uc_value_t **res);
 
 __hidden const char *uc_vm_main_key(uc_program_t *program, uc_vm_main_key_t key);
 

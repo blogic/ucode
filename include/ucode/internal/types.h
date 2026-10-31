@@ -238,10 +238,11 @@ __hidden bool ucv_object_remove(uc_value_t *, const char *, size_t);
 __hidden uc_value_t *ucv_object_lookup_string(uc_value_t *, uc_value_t *, bool *);
 __hidden bool ucv_object_insert_string(uc_value_t *, uc_value_t *, uc_value_t *);
 
-/* The hash of the string `key` as an object key, and ucv_key_get() of an
- * own key of the object `obj` with that hash, which returns false if `obj`
- * is no object or lacks the key */
+/* The hash of the string `key` as an object key, ucv_object_lookup_string()
+ * with that hash, and ucv_key_get() of an own key of the object `obj` with
+ * that hash, which returns false if `obj` is no object or lacks the key */
 __hidden uint64_t ucv_object_key_hash(uc_value_t *key);
+__hidden uc_value_t *ucv_object_lookup_hashed(uc_value_t *, uc_value_t *, uint64_t, bool *);
 __hidden bool ucv_key_get_hashed(uc_vm_t *vm, uc_value_t *obj, uc_value_t *key, uint64_t hash,
                                  uc_value_t **res);
 

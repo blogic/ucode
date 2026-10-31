@@ -524,32 +524,6 @@ uc_vm_call_native(uc_vm_t *vm, uc_value_t *ctx, uc_cfunction_t *fptr, bool mcall
 		ucv_put(res);
 }
 
-/* The exports of the modules that a program links statically belong to the
- * closure of its entry function that runs them, and live as long as that
- * closure. An exported function holds the program, so exports that the program
- * owned itself would keep the program alive. */
-static bool
-uc_vm_closure_is_entry(uc_closure_t *closure)
-{
-	uc_function_t *function = closure->function;
-
-	return function->program->functions.prev == &function->progref;
-}
-
-void
-uc_vm_run_begin(uc_closure_t *closure, bool keep)
-{
-	if (uc_vm_closure_is_entry(closure))
-		uc_vector_push(&closure->function->program->runs, { .closure = closure, .keep = keep });
-}
-
-void
-uc_vm_run_end(uc_closure_t *closure)
-{
-	if (uc_vm_closure_is_entry(closure))
-		uc_vector_pop(&closure->function->program->runs);
-}
-
 /* Returns the expression invoked by the call that the instruction the VM is
  * about to execute belongs to, or NULL if it cannot be determined. The result
  * is meant for error messages describing a failed call, and must be
@@ -2170,112 +2144,81 @@ uc_vm_spread_finish(uc_vm_t *vm, size_t base, size_t nargs, size_t from)
 	vm->stack.count = base + count;
 }
 
-uc_value_t *
-uc_vm_global_get(uc_vm_t *vm, uc_value_t *name, bool strict)
+/* Finds the scope in the chain of the globals that has the string `name`
+ * with the object key hash `hash`, or the last scope if none has it, which
+ * fails in strict mode */
+static bool
+uc_vm_global_find(uc_vm_t *vm, uc_value_t *name, uint64_t hash, bool strict,
+                  uc_value_t **scope, uc_value_t **val)
 {
-	uc_value_t *scope, *next, *val = NULL;
+	uc_value_t *next;
 	bool found;
 
-	scope = vm->globals;
-
-	while (ucv_type(name) == UC_STRING) {
-		val = ucv_object_get(scope, ucv_string_get(name), &found);
+	for (*scope = vm->globals; ; *scope = next) {
+		*val = ucv_object_lookup_hashed(*scope, name, hash, &found);
 
 		if (found)
+			return true;
+
+		next = ucv_prototype_get(*scope);
+
+		if (!next)
 			break;
-
-		next = ucv_prototype_get(scope);
-
-		if (!next) {
-			if (strict) {
-				uc_vm_raise_exception(vm, EXCEPTION_REFERENCE,
-				                      "access to undeclared variable %s",
-				                      ucv_string_get(name));
-			}
-
-			break;
-		}
-
-		scope = next;
 	}
+
+	if (!strict)
+		return true;
+
+	uc_vm_raise_exception(vm, EXCEPTION_REFERENCE,
+	                      "access to undeclared variable %s",
+	                      ucv_string_get(name));
+
+	return false;
+}
+
+uc_value_t *
+uc_vm_global_get(uc_vm_t *vm, uc_value_t *name, uint64_t hash, bool strict)
+{
+	uc_value_t *scope, *val;
+
+	if (ucv_type(name) != UC_STRING ||
+	    !uc_vm_global_find(vm, name, hash, strict, &scope, &val))
+		return NULL;
 
 	return ucv_get(val);
 }
 
 bool
-uc_vm_global_set(uc_vm_t *vm, uc_value_t *name, uc_value_t *v, bool strict)
+uc_vm_global_set(uc_vm_t *vm, uc_value_t *name, uint64_t hash, uc_value_t *v, bool strict)
 {
-	uc_value_t *scope, *next;
-	bool found;
+	uc_value_t *scope, *val;
 
-	scope = vm->globals;
+	if (ucv_type(name) != UC_STRING)
+		return true;
 
-	while (ucv_type(name) == UC_STRING) {
-		ucv_object_get(scope, ucv_string_get(name), &found);
+	if (!uc_vm_global_find(vm, name, hash, strict, &scope, &val))
+		return false;
 
-		if (found)
-			break;
-
-		next = ucv_prototype_get(scope);
-
-		if (!next) {
-			if (strict) {
-				uc_vm_raise_exception(vm, EXCEPTION_REFERENCE,
-				                      "access to undeclared variable %s",
-				                      ucv_string_get(name));
-
-				return false;
-			}
-
-			break;
-		}
-
-		scope = next;
-	}
-
-	if (scope && ucv_type(name) == UC_STRING)
-		ucv_object_add(scope, ucv_string_get(name), ucv_get(v));
+	if (scope)
+		ucv_object_insert_string(scope, name, ucv_get(v));
 
 	return true;
 }
 
 bool
-uc_vm_global_update(uc_vm_t *vm, uc_vm_insn_t operation, uc_value_t *name,
+uc_vm_global_update(uc_vm_t *vm, uc_vm_insn_t operation, uc_value_t *name, uint64_t hash,
                     uc_value_t *inc, bool strict, uc_value_t **res)
 {
-	uc_value_t *scope, *next, *val = NULL;
-	bool found;
-
-	scope = vm->globals;
+	uc_value_t *scope, *val;
 
 	assert(ucv_type(name) == UC_STRING);
 
-	while (true) {
-		val = ucv_object_get(scope, ucv_string_get(name), &found);
-
-		if (found)
-			break;
-
-		next = ucv_prototype_get(scope);
-
-		if (!next) {
-			if (strict) {
-				uc_vm_raise_exception(vm, EXCEPTION_REFERENCE,
-				                      "access to undeclared variable %s",
-				                      ucv_string_get(name));
-
-				return false;
-			}
-
-			break;
-		}
-
-		scope = next;
-	}
+	if (!uc_vm_global_find(vm, name, hash, strict, &scope, &val))
+		return false;
 
 	*res = uc_vm_value_arith(vm, operation, val, inc);
 
-	ucv_object_add(scope, ucv_string_get(name), ucv_get(*res));
+	ucv_object_insert_string(scope, name, ucv_get(*res));
 
 	return true;
 }

@@ -7,14 +7,16 @@
 # (the runtime libucode-native.bc, with libucode-native.api and the
 # native-abi directory beside it),
 # NATIVE_LIBS (the libraries it needs), NATIVE_TARGET (the target triple when
-# cross compiling), LLVM_LINK, OPT, LLC, CC, LLVM_OPT_LEVEL, and
-# NATIVE_RUNNER, a command to run the native executable with, such as
-# valgrind or qemu.
+# cross compiling), NATIVE_TARGET_FLAGS (the flags the runtime was built with,
+# which make clang instead of llc compile the program), LLVM_LINK, OPT, LLC,
+# CLANG, CC, LLVM_OPT_LEVEL, and NATIVE_RUNNER, a command to run the native
+# executable with, such as valgrind or qemu.
 
 ucode=${UCODE:-ucode}
 runtime=${UCODE_NATIVE:?UCODE_NATIVE names no libucode-native.bc}
 opt=${OPT:-opt}
 llc=${LLC:-llc}
+clang=${CLANG:-clang}
 cc=${CC:-cc}
 level=${LLVM_OPT_LEVEL:-1}
 libs=${NATIVE_LIBS:--lm -ldl}
@@ -103,10 +105,20 @@ else
 	eval "$ucode $compile_args -c,$flags -o \"\$tmp/prog.ll\" \"\$source\"" || exit $?
 fi
 
+# llc takes the CPU and the float ABI in a syntax of its own
+codegen() {
+	if [ -n "$NATIVE_TARGET_FLAGS" ]; then
+		$clang ${NATIVE_TARGET:+--target=$NATIVE_TARGET} $NATIVE_TARGET_FLAGS -O$level -fPIC \
+			-c "$1" -o "$2"
+	else
+		$llc -O$level -relocation-model=pic -filetype=obj "$1" -o "$2"
+	fi
+}
+
 ${LLVM_LINK:-llvm-link} "$tmp/prog.ll" "$runtime" -o "$tmp/all.bc" &&
 $opt -passes="internalize,default<O$level>" -internalize-public-api-file="${runtime%.bc}.api" \
 	"$tmp/all.bc" -o "$tmp/prog.bc" &&
-$llc -O$level -relocation-model=pic -filetype=obj "$tmp/prog.bc" -o "$tmp/prog.o" &&
+codegen "$tmp/prog.bc" "$tmp/prog.o" &&
 $cc "$tmp/prog.o" $libs -rdynamic -Wl,-rpath,"${runtime%/*}/native-abi" -o "$tmp/prog" || exit 125
 
 eval "$NATIVE_RUNNER \"\$tmp/prog\" $run_args -- \"\$@\""

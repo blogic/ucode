@@ -560,8 +560,10 @@ uc_vm_insn_load_bool(uc_vm_t *vm, uc_vm_insn_t insn)
 static void
 uc_vm_insn_load_var(uc_vm_t *vm, uc_vm_insn_t insn)
 {
-	uc_value_t *name = uc_program_get_constant(uc_vm_current_program(vm), vm->arg.u32);
-	uc_value_t *val = uc_vm_global_get(vm, name, uc_vm_is_strict(vm));
+	uc_program_t *prog = uc_vm_current_program(vm);
+	uc_value_t *name = uc_program_get_constant(prog, vm->arg.u32);
+	uc_value_t *val = uc_vm_global_get(vm, name, uc_program_get_constant_hash(prog, vm->arg.u32),
+	                                   uc_vm_is_strict(vm));
 
 	ucv_put(name);
 
@@ -661,8 +663,10 @@ static void
 uc_vm_insn_store_var(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	uc_value_t *v = uc_vm_stack_pop(vm);
-	uc_value_t *name = uc_program_get_constant(uc_vm_current_program(vm), vm->arg.u32);
-	bool stored = uc_vm_global_set(vm, name, v, uc_vm_is_strict(vm));
+	uc_program_t *prog = uc_vm_current_program(vm);
+	uc_value_t *name = uc_program_get_constant(prog, vm->arg.u32);
+	bool stored = uc_vm_global_set(vm, name, uc_program_get_constant_hash(prog, vm->arg.u32), v,
+	                               uc_vm_is_strict(vm));
 
 	ucv_put(name);
 
@@ -734,10 +738,13 @@ static void
 uc_vm_insn_update_var(uc_vm_t *vm, uc_vm_insn_t insn)
 {
 	uc_value_t *inc = uc_vm_stack_pop(vm);
-	uc_value_t *name = uc_program_get_constant(uc_vm_current_program(vm), vm->arg.u32 & 0x00FFFFFF);
+	uc_program_t *prog = uc_vm_current_program(vm);
+	size_t idx = vm->arg.u32 & 0x00FFFFFF;
+	uc_value_t *name = uc_program_get_constant(prog, idx);
 	uc_value_t *val;
 
-	if (uc_vm_global_update(vm, vm->arg.u32 >> 24, name, inc, uc_vm_is_strict(vm), &val))
+	if (uc_vm_global_update(vm, vm->arg.u32 >> 24, name, uc_program_get_constant_hash(prog, idx),
+	                        inc, uc_vm_is_strict(vm), &val))
 		uc_vm_stack_push(vm, val);
 
 	ucv_put(name);

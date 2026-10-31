@@ -34,6 +34,8 @@
 #include "ucode/vm.h"
 #include "ucode/lib.h"
 
+uc_upvalref_t *const uc_native_nocells[UC_NATIVE_NOCELLS];
+
 static const uc_native_program_t *uc_native_running;
 static uc_native_frame_t *uc_native_frames;
 
@@ -53,9 +55,7 @@ uc_native_slot_set(uc_native_frame_t *frame, size_t slot, uc_value_t *value)
 	uc_value_t *old = *p;
 
 	*p = value;
-
-	if (ucv_is_counted(old))
-		ucv_put(old);
+	uc_native_unref(old);
 }
 
 UC_NATIVE_INLINE uc_value_t *
@@ -77,9 +77,7 @@ uc_native_slot_clear(uc_native_frame_t *frame, size_t slot)
 		frame->cells[slot] = NULL;
 	}
 
-	if (ucv_is_counted(frame->slots[slot]))
-		ucv_put(frame->slots[slot]);
-
+	uc_native_unref(frame->slots[slot]);
 	frame->slots[slot] = NULL;
 }
 
@@ -143,7 +141,7 @@ static void
 uc_native_args_put(uc_value_t **args, size_t nargs)
 {
 	for (size_t i = 0; i < nargs; i++) {
-		ucv_put(args[i]);
+		uc_native_unref(args[i]);
 		args[i] = NULL;
 	}
 }
@@ -158,7 +156,8 @@ uc_native_args_free(uc_value_t **args, size_t nargs)
 /* Binds the arguments to the slots of the function as uc_vm_call_function()
  * binds them to the stack: missing arguments are null, a vararg function
  * gets the excess arguments as an array in its last parameter, excess
- * arguments of other functions are dropped. */
+ * arguments of other functions are dropped. The entries of the argument
+ * array are cleared, as they can be slots of the calling frame. */
 void
 uc_native_enter(uc_native_frame_t *frame, uc_value_t **slots, uc_upvalref_t **cells,
                 uint32_t nslots)
@@ -175,35 +174,49 @@ uc_native_enter(uc_native_frame_t *frame, uc_value_t **slots, uc_upvalref_t **ce
 
 	fixed = function->vararg ? nparams - 1 : nparams;
 
-	for (i = 0; i < fixed && i < frame->nargs; i++) {
+	for (i = 0; i < fixed && i < frame->nargs; i++)
 		slots[1 + i] = frame->args[i];
-		frame->args[i] = NULL;
-	}
 
 	if (function->vararg) {
 		rest = ucv_array_new_length(vm, frame->nargs > fixed ? frame->nargs - fixed : 0);
 
-		for (i = fixed; i < frame->nargs; i++) {
+		for (i = fixed; i < frame->nargs; i++)
 			ucv_array_push(rest, frame->args[i]);
-			frame->args[i] = NULL;
-		}
 
 		slots[nparams] = rest;
 	}
+	else {
+		for (i = fixed; i < frame->nargs; i++)
+			uc_native_unref(frame->args[i]);
+	}
+
+	for (i = 0; i < frame->nargs; i++)
+		frame->args[i] = NULL;
+
+	frame->nargs = 0;
+}
+
+/* Releases the slots of the frame, of which only the first `nused` hold
+ * values unless a closure captured one of them */
+void
+uc_native_frame_release(uc_native_frame_t *frame, size_t nused)
+{
+	uc_value_t **slots = frame->slots;
+
+	for (size_t i = 0; frame->captured && i < frame->nslots; i++)
+		uc_native_slot_clear(frame, i);
+
+	for (size_t i = 0; !frame->captured && i < nused; i++)
+		uc_native_unref(slots[i]);
+
+	frame->slots = NULL;
+	frame->nslots = 0;
 }
 
 void
 uc_native_leave(uc_native_frame_t *frame)
 {
-	for (size_t i = 0; frame->captured && i < frame->nslots; i++)
-		uc_native_slot_clear(frame, i);
-
-	for (size_t i = 0; !frame->captured && i < frame->nslots; i++)
-		if (ucv_is_counted(frame->slots[i]))
-			ucv_put(frame->slots[i]);
-
-	frame->slots = NULL;
-	frame->nslots = 0;
+	uc_native_frame_release(frame, frame->nslots);
 }
 
 /* Unwinds the operand stack of the frame to the slot of the exception
@@ -244,7 +257,7 @@ uc_native_function_info(uc_function_t *function)
  * that it pushes as uc_vm_call_function() does, so that the stack trace,
  * `this` lookups of callbacks and the recursion limit see it. Takes the
  * references to `ctx` and to the arguments, but not the array that holds the
- * arguments, which the caller keeps. */
+ * arguments, nor the closure, which the caller keeps during the call. */
 static uc_value_t *
 uc_native_invoke_run(uc_vm_t *vm, uc_closure_t *closure, uc_value_t *ctx, bool mcall,
                      uc_value_t **args, size_t nargs, bool keep)
@@ -265,15 +278,13 @@ uc_native_invoke_run(uc_vm_t *vm, uc_closure_t *closure, uc_value_t *ctx, bool m
 	uc_value_t *fn;
 	bool owned = false;
 
-	if (vm->callframes.count >= 1000) {
-		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME, "Too much recursion");
+	if (!uc_vm_call_depth_check(vm, false)) {
 		ucv_put(ctx);
 		uc_native_args_put(args, nargs);
 
 		return NULL;
 	}
 
-	ucv_get(&closure->header);
 	uc_native_frames = &frame;
 
 	uc_vector_push(&vm->callframes, {
@@ -291,14 +302,12 @@ uc_native_invoke_run(uc_vm_t *vm, uc_closure_t *closure, uc_value_t *ctx, bool m
 		info = uc_native_function_info(frame.closure->function);
 		info->entry(vm, &frame);
 
-		/* the arguments of a tail call are in an array of the frame */
+		/* the entry took the arguments; those of a tail call are in an
+		 * array of the frame, and the frame holds the tail called closure */
 		if (owned)
-			uc_native_args_free(frame.args, frame.nargs);
-		else
-			uc_native_args_put(frame.args, frame.nargs);
+			free(frame.args);
 
 		frame.args = NULL;
-		frame.nargs = 0;
 
 		if (!frame.tail.pending || vm->exception.type != EXCEPTION_NONE)
 			break;
@@ -309,7 +318,9 @@ uc_native_invoke_run(uc_vm_t *vm, uc_closure_t *closure, uc_value_t *ctx, bool m
 		frame.tail.fn = NULL;
 
 		uc_vm_run_end(frame.closure);
-		ucv_put(&frame.closure->header);
+
+		if (owned)
+			ucv_put(&frame.closure->header);
 
 		frame.closure = ucv_as_closure(fn);
 		frame.ctx = frame.tail.ctx;
@@ -335,14 +346,20 @@ uc_native_invoke_run(uc_vm_t *vm, uc_closure_t *closure, uc_value_t *ctx, bool m
 		uc_vm_run_begin(frame.closure, false);
 	}
 
-	ucv_put(frame.tail.fn);
-	ucv_put(frame.tail.ctx);
-	uc_native_args_free(frame.tail.args, frame.tail.nargs);
+	/* a tail call request that an exception left */
+	if (frame.tail.fn || frame.tail.ctx || frame.tail.args) {
+		ucv_put(frame.tail.fn);
+		ucv_put(frame.tail.ctx);
+		uc_native_args_free(frame.tail.args, frame.tail.nargs);
+	}
 
 	uc_vm_run_end(frame.closure);
 	cf = uc_vector_pop(&vm->callframes);
-	ucv_put(cf->ctx);
-	ucv_put(&frame.closure->header);
+	uc_native_unref(cf->ctx);
+
+	if (owned)
+		ucv_put(&frame.closure->header);
+
 	uc_native_frames = frame.prev;
 
 	if (vm->exception.type != EXCEPTION_NONE) {

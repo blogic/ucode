@@ -222,12 +222,30 @@ uc_native_signals_dispatch(uc_vm_t *vm)
 #define UC_NATIVE_INLINE
 #endif
 
+/* Helpers whose body at each call site costs more space than it saves time;
+ * in ucode-mdns, inlining them grew the code by 25 kB at -Os */
+#define UC_NATIVE_NOINLINE __attribute__((noinline))
+
+/* ucv_put() without a call for the values that have no reference count */
+UC_NATIVE_INLINE static inline void
+uc_native_unref(uc_value_t *v)
+{
+	if (ucv_is_counted(v))
+		ucv_put(v);
+}
+
 /* The functions that generated code calls, see native.c and native_insn.c.
  * They take the VM from the frame, which saves an argument at each call. */
 
 __hidden void uc_native_enter(uc_native_frame_t *frame, uc_value_t **slots,
                               uc_upvalref_t **cells, uint32_t nslots);
+/* the cells of the functions that no closure or export captures from */
+#define UC_NATIVE_NOCELLS	64
+
+__hidden extern uc_upvalref_t *const uc_native_nocells[UC_NATIVE_NOCELLS];
+
 __hidden void uc_native_leave(uc_native_frame_t *frame);
+__hidden void uc_native_frame_release(uc_native_frame_t *frame, size_t nused);
 __hidden bool uc_native_catch(uc_native_frame_t *frame, uint32_t slot);
 __hidden bool uc_native_safepoint(uc_native_frame_t *frame, uint32_t pc);
 
@@ -316,6 +334,22 @@ __hidden bool uc_native_getk(uc_native_frame_t *f, uint32_t pc, int32_t d,
 __hidden void uc_native_popn(UC_NATIVE_INSN_ARGS);
 __hidden bool uc_native_callpop(UC_NATIVE_INSN_ARGS);
 __hidden void uc_native_slocpop(UC_NATIVE_INSN_ARGS);
+
+#define UC_NATIVE_LCALL_SLOT	0x7fff0000u
+#define UC_NATIVE_COPYJMPZ_POP	(1u << 31)
+
+__hidden bool uc_native_lcall(UC_NATIVE_INSN_ARGS);
+__hidden bool uc_native_lcallpop(UC_NATIVE_INSN_ARGS);
+__hidden bool uc_native_copyjmpz(UC_NATIVE_INSN_ARGS);
+
+/* each half of the argument of uc_native_load2() is a kind and an index */
+#define UC_NATIVE_LOAD2_KIND_SHIFT	14
+#define UC_NATIVE_LOAD2_INDEX		0x3fff
+#define UC_NATIVE_LOAD2_LLOC		0
+#define UC_NATIVE_LOAD2_LUPV		1
+#define UC_NATIVE_LOAD2_CONST		2
+
+__hidden void uc_native_load2(UC_NATIVE_INSN_ARGS);
 __hidden bool uc_native_jnull(UC_NATIVE_INSN_ARGS);
 __hidden bool uc_native_notjmpz(UC_NATIVE_INSN_ARGS);
 

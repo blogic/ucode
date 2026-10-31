@@ -71,7 +71,9 @@ check that ucode provides exepected help:
     ride interpreter line with ...), dynlink=... (force import from ... to
     be treated as shared extensions loaded at runtime), module (build load-
     able library), llvm (write LLVM IR of a native program, if built with
-    LLVM support), target=... (LLVM target triple of the native program),
+    LLVM support; the IR must be compiled for the CPU and float ABI that
+    NATIVE_TARGET_FLAGS of the runtime name, as clang with these flags
+    does), target=... (LLVM target triple of the native program),
     embed=[path=]file (also embed `file` or the scripts below it, which the
     program loads as `path` by computed names), embed-template=[path=]file
     (the same for templates), debug (embed debug information and source

@@ -799,7 +799,7 @@ llvm_emit_insn(FILE *out, llvm_func_t *f, llvm_insn_t *in, const char *prefix)
 	case I_RETURN:
 		fputs("  call void @uc_native_return", out);
 		llvm_emit_args(out, f, in, prefix);
-		fputs("\n  br label %leave\n", out);
+		fputs("\n  ret void\n", out);
 		return;
 
 	case I_CALL:
@@ -922,11 +922,12 @@ llvm_emit_fused_call(FILE *out, llvm_func_t *f, size_t i, llvm_insn_t *op, llvm_
 	fputc('\n', out);
 }
 
-/* A helper `name` that runs the instruction at `i` up to the JMPZ `jump` and
- * returns whether the jump is taken */
+/* A helper `name` that runs the instruction at `i` up to the JMPZ `jump`,
+ * and up to `last` if the jump is not taken, and returns whether the jump
+ * is taken */
 static void
-llvm_emit_fused_jump(FILE *out, llvm_func_t *f, size_t i, llvm_insn_t *jump, uint32_t arg,
-                     const char *name)
+llvm_emit_fused_jump(FILE *out, llvm_func_t *f, size_t i, llvm_insn_t *jump, llvm_insn_t *last,
+                     uint32_t arg, const char *name)
 {
 	llvm_insn_t *first = &f->insns.entries[i];
 	size_t target = llvm_jump_target(jump);
@@ -936,8 +937,65 @@ llvm_emit_fused_jump(FILE *out, llvm_func_t *f, size_t i, llvm_insn_t *jump, uin
 	        "i32 %u, ptr null)\n", first->off, name, jump->next, first->depth, arg);
 	fprintf(out, "  br i1 %%t%zu, label ", first->off);
 	llvm_emit_branch_to(out, f, jump, target);
-	fprintf(out, ", label %%L%zu\n", jump->next);
+	fprintf(out, ", label %%L%zu\n", last->next);
 	llvm_emit_safepoint(out, f, jump, target);
+}
+
+/* The half of the argument of uc_native_load2() for an LLOC, LUPV or LOAD
+ * whose index fits */
+static bool
+llvm_load2_op(llvm_insn_t *in, uint32_t *op)
+{
+	uint32_t kind;
+
+	if (!in || in->arg > UC_NATIVE_LOAD2_INDEX)
+		return false;
+
+	switch (in->insn) {
+	case I_LLOC:
+		kind = UC_NATIVE_LOAD2_LLOC;
+		break;
+
+	case I_LUPV:
+		kind = UC_NATIVE_LOAD2_LUPV;
+		break;
+
+	case I_LOAD:
+		kind = UC_NATIVE_LOAD2_CONST;
+		break;
+
+	default:
+		return false;
+	}
+
+	*op = in->arg | (kind << UC_NATIVE_LOAD2_KIND_SHIFT);
+
+	return true;
+}
+
+/* LLOC, then CALL without spread arguments, then POP or not */
+static size_t
+llvm_emit_lcall(FILE *out, llvm_func_t *f, size_t i, const char *prefix)
+{
+	llvm_insn_t *in = &f->insns.entries[i], *call = llvm_fusable(f, i, 1), *pop;
+	uint32_t arg;
+
+	if (!llvm_insn_is(call, I_CALL, I_CALL) || call->tail ||
+	    (call->arg & UC_NATIVE_LCALL_SLOT) || in->arg > (UC_NATIVE_LCALL_SLOT >> 16))
+		return 0;
+
+	arg = call->arg | (in->arg << 16);
+	pop = llvm_fusable(f, i, 2);
+
+	if (!llvm_insn_is(pop, I_POP, I_POP)) {
+		llvm_emit_fused_call(out, f, i, call, call, arg, "lcall", true, prefix);
+
+		return 2;
+	}
+
+	llvm_emit_fused_call(out, f, i, call, pop, arg, "lcallpop", true, prefix);
+
+	return 3;
 }
 
 /* Emits the instruction at `i` together with the ones after it as one
@@ -946,7 +1004,8 @@ llvm_emit_fused_jump(FILE *out, llvm_func_t *f, size_t i, llvm_insn_t *jump, uin
 static size_t
 llvm_emit_fused(FILE *out, llvm_func_t *f, size_t i, const char *prefix)
 {
-	llvm_insn_t *in = &f->insns.entries[i], *next = llvm_fusable(f, i, 1), *jump;
+	llvm_insn_t *in = &f->insns.entries[i], *next = llvm_fusable(f, i, 1), *jump, *pop;
+	uint32_t a, b;
 	size_t n;
 
 	if ((n = llvm_emit_getk(out, f, i)) != 0)
@@ -980,13 +1039,28 @@ llvm_emit_fused(FILE *out, llvm_func_t *f, size_t i, const char *prefix)
 
 		return 2;
 
+	case I_LLOC:
+		if ((n = llvm_emit_lcall(out, f, i, prefix)) != 0)
+			return n;
+
+		/* fall through */
+
+	case I_LUPV:
+	case I_LOAD:
+		if (!llvm_load2_op(in, &a) || !llvm_load2_op(next, &b))
+			return 0;
+
+		llvm_emit_fused_call(out, f, i, in, next, a | (b << 16), "load2", false, prefix);
+
+		return 2;
+
 	case I_LNULL:
 		jump = llvm_fusable(f, i, 2);
 
 		if (!llvm_insn_is(next, I_EQS, I_NES) || !llvm_insn_is(jump, I_JMPZ, I_JMPZ))
 			return 0;
 
-		llvm_emit_fused_jump(out, f, i, jump, next->insn == I_NES, "jnull");
+		llvm_emit_fused_jump(out, f, i, jump, jump, next->insn == I_NES, "jnull");
 
 		return 3;
 
@@ -994,19 +1068,47 @@ llvm_emit_fused(FILE *out, llvm_func_t *f, size_t i, const char *prefix)
 		if (!llvm_insn_is(next, I_JMPZ, I_JMPZ))
 			return 0;
 
-		llvm_emit_fused_jump(out, f, i, next, 0, "notjmpz");
+		llvm_emit_fused_jump(out, f, i, next, next, 0, "notjmpz");
 
 		return 2;
+
+	case I_COPY:
+		pop = llvm_fusable(f, i, 2);
+
+		if (!llvm_insn_is(next, I_JMPZ, I_JMPZ) || in->arg >= UC_NATIVE_COPYJMPZ_POP)
+			return 0;
+
+		if (!llvm_insn_is(pop, I_POP, I_POP)) {
+			llvm_emit_fused_jump(out, f, i, next, next, in->arg, "copyjmpz");
+
+			return 2;
+		}
+
+		llvm_emit_fused_jump(out, f, i, next, pop, in->arg | UC_NATIVE_COPYJMPZ_POP, "copyjmpz");
+
+		return 3;
 
 	default:
 		return 0;
 	}
 }
 
+/* Whether a closure or an export can capture a slot of the function */
+static bool
+llvm_func_captures(llvm_func_t *f)
+{
+	uc_vector_foreach(&f->insns, in)
+		if (in->insn == I_CLFN || in->insn == I_ARFN || in->insn == I_EXPORT)
+			return true;
+
+	return false;
+}
+
 static void
 llvm_emit_function(FILE *out, llvm_func_t *f, size_t unit)
 {
 	uc_ehranges_t *ranges = &f->fn->chunk.ehranges;
+	const char *cells = "@uc_native_nocells";
 	char prefix[48];
 	llvm_insn_t *in;
 
@@ -1027,11 +1129,16 @@ llvm_emit_function(FILE *out, llvm_func_t *f, size_t unit)
 	fprintf(out, "define internal void @%s(ptr %%vm, ptr %%frame) {\n", prefix);
 	fprintf(out, "entry:\n");
 	fprintf(out, "  %%slots = alloca [%zu x ptr]\n", f->nslots);
-	fprintf(out, "  %%cells = alloca [%zu x ptr]\n", f->nslots);
 	fprintf(out, "  store [%zu x ptr] zeroinitializer, ptr %%slots\n", f->nslots);
-	fprintf(out, "  store [%zu x ptr] zeroinitializer, ptr %%cells\n", f->nslots);
-	fprintf(out, "  call void @uc_native_enter(ptr %%frame, ptr %%slots, ptr %%cells, i32 %zu)\n",
-	        f->nslots);
+
+	if (llvm_func_captures(f) || f->nslots > UC_NATIVE_NOCELLS) {
+		fprintf(out, "  %%cells = alloca [%zu x ptr]\n", f->nslots);
+		fprintf(out, "  store [%zu x ptr] zeroinitializer, ptr %%cells\n", f->nslots);
+		cells = "%cells";
+	}
+
+	fprintf(out, "  call void @uc_native_enter(ptr %%frame, ptr %%slots, ptr %s, i32 %zu)\n",
+	        cells, f->nslots);
 	fprintf(out, "  br label %%L0\n");
 
 	for (size_t i = 0, n; i < f->insns.count; i += n) {
@@ -1070,6 +1177,7 @@ llvm_emit_declarations(FILE *out)
 {
 	char name[16];
 
+	fprintf(out, "@uc_native_nocells = external constant [%d x ptr]\n", UC_NATIVE_NOCELLS);
 	fputs("declare void @uc_native_enter(ptr, ptr, ptr, i32)\n"
 	      "declare void @uc_native_leave(ptr)\n"
 	      "declare zeroext i1 @uc_native_catch(ptr, i32)\n"
@@ -1080,6 +1188,10 @@ llvm_emit_declarations(FILE *out)
 	      "declare void @uc_native_popn(ptr, i32, i32, i32, ptr)\n"
 	      "declare zeroext i1 @uc_native_callpop(ptr, i32, i32, i32, ptr)\n"
 	      "declare void @uc_native_slocpop(ptr, i32, i32, i32, ptr)\n"
+	      "declare zeroext i1 @uc_native_lcall(ptr, i32, i32, i32, ptr)\n"
+	      "declare zeroext i1 @uc_native_lcallpop(ptr, i32, i32, i32, ptr)\n"
+	      "declare zeroext i1 @uc_native_copyjmpz(ptr, i32, i32, i32, ptr)\n"
+	      "declare void @uc_native_load2(ptr, i32, i32, i32, ptr)\n"
 	      "declare zeroext i1 @uc_native_jnull(ptr, i32, i32, i32, ptr)\n"
 	      "declare zeroext i1 @uc_native_notjmpz(ptr, i32, i32, i32, ptr)\n", out);
 
