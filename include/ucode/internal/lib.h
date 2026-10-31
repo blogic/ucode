@@ -154,9 +154,12 @@ typedef uc_program_t *(*uc_loader_compile_t)(uc_parse_config_t *, uc_source_t *,
 __hidden void uc_loader_compile_set(uc_loader_compile_t compile);
 
 /* Scripts that a native program contains: the loaders find them by path
- * before they look at the file system. */
+ * before they look at the file system. unit_closure() returns the closure of
+ * a script, or sets *errp to the compile error of a script that the program
+ * contains as failed to compile. */
 typedef struct {
-	uc_value_t *(*unit_closure)(uc_vm_t *vm, const char *path, bool raw_mode, bool module_mode);
+	uc_value_t *(*unit_closure)(uc_vm_t *vm, const char *path, bool raw_mode, bool module_mode,
+	                            char **errp);
 	char *(*unit_path)(const char *path);
 	char *(*source_path)(const char *runpath);
 } uc_loader_units_t;

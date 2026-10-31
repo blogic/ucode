@@ -70,6 +70,7 @@ __hidden bool uc_program_function_stmt_bounds(uc_function_t *, size_t, size_t *,
 __hidden void uc_program_function_free(uc_function_t *);
 
 __hidden uc_value_t *uc_program_get_constant(uc_program_t *, size_t);
+__hidden uint64_t uc_program_get_constant_hash(uc_program_t *, size_t);
 __hidden ssize_t uc_program_add_constant(uc_program_t *, uc_value_t *);
 
 #endif /* UCODE_INTERNAL_PROGRAM_H */

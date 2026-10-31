@@ -165,13 +165,50 @@ uc_program_function_free(uc_function_t *func)
 
 	ucv_unref(&func->progref);
 	uc_chunk_free(&func->chunk);
+	free(func->native);
 	free(func);
 }
 
+/* Constants are immutable, so each one is created once and shared by all its
+ * uses, instead of once per evaluation. */
 uc_value_t *
 uc_program_get_constant(uc_program_t *prog, size_t idx)
 {
-	return uc_vallist_get(&prog->constants, idx);
+	uc_constant_values_t *values = &prog->constant_values;
+
+	if (idx >= prog->constants.isize)
+		return NULL;
+
+	if (idx >= values->count) {
+		uc_vector_extend(values, prog->constants.isize - values->count);
+		values->count = prog->constants.isize;
+	}
+
+	if (!values->entries[idx])
+		values->entries[idx] = uc_vallist_get(&prog->constants, idx);
+
+	return ucv_get(values->entries[idx]);
+}
+
+/* The hash of the string constant `idx` as an object key, computed once */
+uint64_t
+uc_program_get_constant_hash(uc_program_t *prog, size_t idx)
+{
+	uc_constant_hashes_t *hashes = &prog->constant_hashes;
+	uc_value_t *v;
+
+	if (idx >= hashes->count) {
+		uc_vector_extend(hashes, prog->constants.isize - hashes->count);
+		hashes->count = prog->constants.isize;
+	}
+
+	if (!hashes->entries[idx]) {
+		v = uc_program_get_constant(prog, idx);
+		hashes->entries[idx] = ucv_object_key_hash(v);
+		ucv_put(v);
+	}
+
+	return hashes->entries[idx];
 }
 
 ssize_t

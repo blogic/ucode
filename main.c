@@ -31,6 +31,7 @@
 #include "ucode/program.h"
 
 #include "ucode/internal/cli.h"
+#include "ucode/internal/native.h"
 
 #ifdef __GLIBC__
 # define POSIXLY_CORRECT_FLAG "+"
@@ -104,7 +105,13 @@ print_usage(const char *app)
 	"  Supported flags: no-interp (omit interpreter line), interp=... (over-\n"
 	"  ride interpreter line with ...), dynlink=... (force import from ... to\n"
 	"  be treated as shared extensions loaded at runtime), module (build load-\n"
-	"  able library).\n\n"
+	"  able library), llvm (write LLVM IR of a native program, if built with\n"
+	"  LLVM support), target=... (LLVM target triple of the native program),\n"
+	"  embed=[path=]file (also embed `file` or the scripts below it, which the\n"
+	"  program loads as `path` by computed names), embed-template=[path=]file\n"
+	"  (the same for templates), debug (embed debug information and source\n"
+	"  text for complete stack traces), map=... (write the program with debug\n"
+	"  information to ..., for ucode-trace to resolve its stack traces).\n\n"
 
 	"-o path\n"
 	"  Output file path when compiling. If omitted, the compiled byte code\n"
@@ -155,7 +162,35 @@ typedef struct {
 	bool autoprint;
 	debug_mode_t debug;
 	char *breakpoint;
+	bool llvm;
+	uc_llvm_options_t *native;
 } compile_opts_t;
+
+static int
+write_llvm(uc_vm_t *vm, uc_program_t *program, FILE *out, const compile_opts_t *opts)
+{
+#ifdef HAVE_LLVM_SUPPORT
+	uc_parse_config_t *config = vm->config;
+	char *err = NULL;
+	bool ok;
+
+	opts->native->config = config;
+
+	ok = uc_program_write_llvm(program, out, opts->native, &err);
+
+	if (!ok) {
+		fprintf(stderr, "%s", err ? err : "Unable to write LLVM IR\n");
+		free(err);
+	}
+
+	return ok ? 0 : -1;
+#else
+	fprintf(stderr, "This ucode was built without LLVM support\n");
+
+	return -1;
+#endif
+}
+
 static int
 compile(uc_vm_t *vm, uc_source_t *src, FILE *precompile, const compile_opts_t *opts)
 {
@@ -173,6 +208,12 @@ compile(uc_vm_t *vm, uc_source_t *src, FILE *precompile, const compile_opts_t *o
 		fprintf(stderr, "%s", err);
 		free(err);
 		rc = -1;
+		goto out;
+	}
+
+	if (precompile && opts->llvm) {
+		rc = write_llvm(vm, program, precompile, opts);
+		fclose(precompile);
 		goto out;
 	}
 
@@ -408,7 +449,7 @@ parse_template_modeflags(char *opt, uc_parse_config_t *config)
 
 static void
 parse_compile_flags(char *opt, char **interp, uc_search_path_t *dynlink_list,
-                    bool *module)
+                    bool *module, bool *llvm, uc_llvm_options_t *native)
 {
 	char *p, *k, *v;
 
@@ -446,6 +487,48 @@ parse_compile_flags(char *opt, char **interp, uc_search_path_t *dynlink_list,
 
 			*module = true;
 		}
+		else if (!strcmp(k, "llvm")) {
+			if (v)
+				fprintf(stderr, "Compile flag \"%s\" takes no value, ignoring\n", k);
+
+			*llvm = true;
+		}
+		else if (!strcmp(k, "target")) {
+			if (!v)
+				fprintf(stderr, "Compile flag \"%s\" requires a value, ignoring\n", k);
+			else
+				native->triple = v;
+		}
+		else if (!strcmp(k, "debug")) {
+			if (v)
+				fprintf(stderr, "Compile flag \"%s\" takes no value, ignoring\n", k);
+
+			native->debug = true;
+		}
+		else if (!strcmp(k, "map")) {
+			if (!v)
+				fprintf(stderr, "Compile flag \"%s\" requires a value, ignoring\n", k);
+			else
+				native->map = v;
+		}
+		else if (!strcmp(k, "embed") || !strcmp(k, "embed-template")) {
+			if (!v) {
+				fprintf(stderr, "Compile flag \"%s\" requires a value, ignoring\n", k);
+				continue;
+			}
+
+			/* [logical=]path */
+			char *path = strchr(v, '=');
+
+			if (path)
+				*path++ = 0;
+
+			uc_vector_push(native->embeds, {
+				.path = path ? path : v,
+				.logical = path ? v : NULL,
+				.template = !strcmp(k, "embed-template")
+			});
+		}
 		else {
 			fprintf(stderr, "Unrecognized -c flag \"%s\", ignoring\n", k);
 		}
@@ -472,7 +555,9 @@ int
 main(int argc, char **argv)
 {
 	const char *optspec = POSIXLY_CORRECT_FLAG "he:p:tg:ST::RD:F:U:l:L:c::o:sx::X::";
-	bool strip = false, print_result = false;
+	bool strip = false, print_result = false, llvm = false;
+	uc_llvm_embeds_t embeds = { 0 };
+	uc_llvm_options_t native = { .embeds = &embeds };
 	debug_mode_t debug = DEBUG_MODE_NONE;
 	char *breakpoint = NULL;
 	char *interp = "/usr/bin/env ucode";
@@ -534,6 +619,7 @@ main(int argc, char **argv)
 	uc_search_path_init(&config.module_search_path);
 
 	argv0 = argv[optind];
+	native.script_name = argv0;
 	optind = 1;
 
 	uc_vm_init(&vm, &config);
@@ -604,7 +690,7 @@ main(int argc, char **argv)
 		case 'c':
 			outfile = "./uc.out";
 			parse_compile_flags(optarg, &interp, &config.force_dynlink_list,
-			                    &config.compile_module);
+			                    &config.compile_module, &llvm, &native);
 			break;
 
 		case 's':
@@ -679,11 +765,14 @@ main(int argc, char **argv)
 		.autoprint = print_result,
 		.debug = debug,
 		.breakpoint = breakpoint,
+		.llvm = llvm,
+		.native = &native,
 	}));
 
 out:
 	uc_search_path_free(&config.module_search_path);
 	uc_vector_clear(&config.force_dynlink_list);
+	uc_vector_clear(&embeds);
 
 	uc_source_put(source);
 

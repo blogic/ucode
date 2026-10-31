@@ -3077,15 +3077,40 @@ uc_path_normalize(const char *path)
 	return res;
 }
 
+/* Raises the error of a failed compilation of the file `filename`, or of a
+ * source string if NULL. */
+static void
+uc_load_error(uc_vm_t *vm, const char *filename, char **err)
+{
+	uc_error_message_indent(err);
+
+	if (!filename)
+		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME,
+			"Unable to compile source string:\n\n%s", *err);
+	else
+		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME,
+			"Unable to compile source file '%s':\n\n%s", filename, *err);
+}
+
 static bool
 uc_require_ucode(uc_vm_t *vm, const char *path, uc_value_t *scope, uc_value_t **res, bool raw_mode, bool module_mode)
 {
 	uc_parse_config_t config = *vm->config, *prev_config = vm->config;
 	uc_value_t *closure = NULL;
+	char *err = NULL;
 	struct stat st;
 
 	if (uc_loader_units)
-		closure = uc_loader_units->unit_closure(vm, path, raw_mode, module_mode);
+		closure = uc_loader_units->unit_closure(vm, path, raw_mode, module_mode, &err);
+
+	/* a script that the native program contains but that failed to compile
+	 * fails to load as it would in the interpreter */
+	if (err) {
+		uc_load_error(vm, path, &err);
+		free(err);
+
+		return true;
+	}
 
 	if (!closure && stat(path, &st))
 		return false;
@@ -5957,16 +5982,8 @@ uc_load_common(uc_vm_t *vm, size_t nargs, uc_source_t *source, bool is_file)
 	if (!vm->config || conf.force_dynlink_list.entries != vm->config->force_dynlink_list.entries)
 		uc_vector_clear(&conf.force_dynlink_list);
 
-	if (!closure) {
-		uc_error_message_indent(&err);
-
-		if (!is_file)
-			uc_vm_raise_exception(vm, EXCEPTION_RUNTIME,
-				"Unable to compile source string:\n\n%s", err);
-		else
-			uc_vm_raise_exception(vm, EXCEPTION_RUNTIME,
-				"Unable to compile source file '%s':\n\n%s", source->filename, err);
-	}
+	if (!closure)
+		uc_load_error(vm, is_file ? source->filename : NULL, &err);
 
 	uc_source_put(source);
 	free(err);

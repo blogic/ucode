@@ -118,6 +118,11 @@ if(NOT COMPILE_SUPPORT)
   target_compile_definitions(uc_defines INTERFACE NO_COMPILE)
 endif()
 
+option(LLVM_SUPPORT "Support native programs: LLVM IR output and runtime (Linux only)" OFF)
+if(LLVM_SUPPORT)
+  target_compile_definitions(uc_defines INTERFACE HAVE_LLVM_SUPPORT)
+endif()
+
 if(NOT UCODE_WASM)
   find_library(libuci NAMES uci)
   find_library(libubox NAMES ubox)
@@ -235,6 +240,9 @@ else()
 endif()
 
 set(UCODE_SOURCES lexer.c lib.c vm.c vmcore.c chunk.c vallist.c compiler.c source.c types.c json.c program.c bytecode.c platform.c cli.c)
+if(LLVM_SUPPORT)
+  list(APPEND UCODE_SOURCES llvm.c native_trace.c)
+endif()
 if(UCODE_WASM)
   add_library(libucode STATIC ${UCODE_SOURCES})
   set_target_properties(libucode PROPERTIES OUTPUT_NAME ucode)
@@ -249,6 +257,106 @@ if(NOT UCODE_WASM)
   set(CLI_SOURCES main.c)
   add_executable(ucode ${CLI_SOURCES})
   target_link_libraries(ucode uc_defines libucode)
+
+  if(LLVM_SUPPORT)
+    add_executable(ucode-trace trace.c)
+    target_link_libraries(ucode-trace uc_defines libucode)
+  endif()
+endif()
+
+if(LLVM_SUPPORT AND NOT UCODE_WASM)
+  # Bindings that are linked against libucode load this library in its place,
+  # see native_abi.c. Native programs name its install directory in their
+  # RUNPATH. musl reuses a loaded library only if a search by name found it,
+  # so a program cannot load it by an absolute path.
+  add_library(ucode-native-abi SHARED native_abi.c)
+  set_target_properties(ucode-native-abi PROPERTIES
+    OUTPUT_NAME ucode SOVERSION ${SOVERSION}
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/native-abi)
+
+  # The runtime of native programs, as LLVM bitcode: everything of libucode
+  # except the interpreter and the compiler. The lexer only provides utf8enc()
+  # there. A native program is linked with it at the IR level, so that LLVM
+  # inlines the runtime into the generated code. The bitcode must match the
+  # LLVM version of opt and llc.
+  find_program(NATIVE_CLANG NAMES clang clang-21 clang-20 clang-19 clang-18 clang-17 clang-16)
+  find_program(NATIVE_LLVM_LINK NAMES llvm-link llvm-link-21 llvm-link-20 llvm-link-19
+                                      llvm-link-18 llvm-link-17 llvm-link-16)
+  find_program(NATIVE_LLVM_DIS NAMES llvm-dis llvm-dis-21 llvm-dis-20 llvm-dis-19
+                                     llvm-dis-18 llvm-dis-17 llvm-dis-16)
+  set(NATIVE_TARGET "" CACHE STRING "Target triple of the runtime bitcode, empty for the host")
+
+  if(NOT NATIVE_CLANG OR NOT NATIVE_LLVM_LINK OR NOT NATIVE_LLVM_DIS)
+    message(FATAL_ERROR "LLVM_SUPPORT requires clang, llvm-link and llvm-dis")
+  endif()
+
+  set(native_bc_flags -O2 -std=gnu99 -fPIE -emit-llvm -c
+    -DUC_NATIVE_ABI_SONAME="libucode.so.${SOVERSION}"
+    "-D$<JOIN:$<TARGET_PROPERTY:libucode,COMPILE_DEFINITIONS>,$<SEMICOLON>-D>"
+    "-I$<JOIN:$<TARGET_PROPERTY:libucode,INCLUDE_DIRECTORIES>,$<SEMICOLON>-I>")
+
+  if(NATIVE_TARGET)
+    list(APPEND native_bc_flags --target=${NATIVE_TARGET})
+  endif()
+
+  if(CMAKE_SYSROOT)
+    list(APPEND native_bc_flags --sysroot=${CMAKE_SYSROOT})
+  endif()
+
+  set(native_bc_files)
+
+  foreach(src lib.c vmcore.c chunk.c vallist.c source.c types.c json.c program.c platform.c
+              cli.c native.c native_insn.c lexer.c)
+    get_filename_component(name ${src} NAME_WE)
+    set(bc ${CMAKE_BINARY_DIR}/native-bc/${name}.bc)
+
+    if(src STREQUAL "lexer.c")
+      set(extra -DNO_COMPILE)
+    else()
+      set(extra)
+    endif()
+
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.20)
+      set(deps DEPFILE ${bc}.d)
+      set(depflags -MD -MF ${bc}.d)
+    else()
+      set(deps IMPLICIT_DEPENDS C ${CMAKE_CURRENT_SOURCE_DIR}/${src})
+      set(depflags)
+    endif()
+
+    add_custom_command(
+      OUTPUT ${bc}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/native-bc
+      COMMAND ${NATIVE_CLANG} ${native_bc_flags} ${extra} ${depflags}
+              ${CMAKE_CURRENT_SOURCE_DIR}/${src} -o ${bc}
+      DEPENDS ${src}
+      ${deps}
+      COMMAND_EXPAND_LISTS
+      VERBATIM)
+
+    list(APPEND native_bc_files ${bc})
+  endforeach()
+
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/libucode-native.bc
+    COMMAND ${NATIVE_LLVM_LINK} ${native_bc_files} -o ${CMAKE_BINARY_DIR}/libucode-native.bc
+    DEPENDS ${native_bc_files}
+    VERBATIM)
+
+  # the symbols to keep when the program is linked with opt's internalize
+  # pass: -internalize-public-api-file=libucode-native.api
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/libucode-native.api
+    COMMAND ${NATIVE_LLVM_DIS} ${CMAKE_BINARY_DIR}/libucode-native.bc
+            -o ${CMAKE_BINARY_DIR}/native-bc/libucode-native.ll
+    COMMAND ${CMAKE_COMMAND} -DINPUT=${CMAKE_BINARY_DIR}/native-bc/libucode-native.ll
+            -DOUTPUT=${CMAKE_BINARY_DIR}/libucode-native.api
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/native-api.cmake
+    DEPENDS ${CMAKE_BINARY_DIR}/libucode-native.bc ${CMAKE_CURRENT_SOURCE_DIR}/cmake/native-api.cmake
+    VERBATIM)
+
+  add_custom_target(ucode-native ALL
+    DEPENDS ${CMAKE_BINARY_DIR}/libucode-native.bc ${CMAKE_BINARY_DIR}/libucode-native.api)
 endif()
 
 # Ensure rpath is used on macOS
@@ -622,8 +730,18 @@ if(UCODE_WASM)
   install(TARGETS libucode ucode-modules ARCHIVE DESTINATION lib)
 else()
   install(TARGETS ucode udbg RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+  if(LLVM_SUPPORT)
+    install(TARGETS ucode-trace RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  endif()
+
   install(TARGETS libucode LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
   install(TARGETS ${LIBRARIES} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/ucode)
+
+  if(LLVM_SUPPORT)
+    install(TARGETS ucode-native-abi LIBRARY
+      DESTINATION ${CMAKE_INSTALL_LIBDIR}/ucode/native NAMELINK_SKIP)
+  endif()
 endif()
 
 if(NOT UCODE_WASM)

@@ -18,6 +18,7 @@
 #include <math.h>
 #include <errno.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -689,6 +690,16 @@ uc_vm_capture_stacktrace(uc_vm_t *vm, size_t i)
 			uc_vm_stacktrace_add_position(entry, source, srcpos, "line", "byte");
 
 			uc_vm_stacktrace_add_statement(vm, entry, function, off);
+
+			/* without debug information the position is that of the function
+			 * only; record the function and instruction offset, which the debug
+			 * information of a separate copy of the program can resolve */
+			if (!function->chunk.debuginfo.offsets.count) {
+				ucv_object_add(entry, "path", ucv_string_new(source->runpath));
+				ucv_object_add(entry, "id",
+					ucv_uint64_new(uc_program_function_id(function->program, function)));
+				ucv_object_add(entry, "pc", ucv_uint64_new(off));
+			}
 		}
 
 		if (i > 1) {
@@ -724,6 +735,46 @@ uc_vm_capture_stacktrace(uc_vm_t *vm, size_t i)
 	return stacktrace;
 }
 
+/* Describes the frames of a stack trace of code without debug information by
+ * their function and instruction offset, in the form that the debug
+ * information of the program can resolve later, see ucode-trace. */
+static void
+uc_vm_stacktrace_format_positions(uc_stringbuf_t *buf, uc_value_t *stacktrace)
+{
+	uc_value_t *entry, *path, *file, *name, *tco;
+	const char *prefix, *fn;
+
+	for (size_t i = 0; i < ucv_array_length(stacktrace); i++) {
+		entry = ucv_array_get(stacktrace, i);
+		path = ucv_object_get(entry, "path", NULL);
+		file = ucv_object_get(entry, "filename", NULL);
+		name = ucv_object_get(entry, "function", NULL);
+		tco = ucv_object_get(entry, "tco", NULL);
+		prefix = i ? "  called from " : "In ";
+		fn = name ? ucv_string_get(name) : "[anonymous function]";
+
+		/* code with debug information, e.g. a closure of another program, is
+		 * described by its source position */
+		if (path)
+			ucv_stringbuf_printf(buf, "%sfunction #%" PRIu64 " at offset %" PRIu64 " of %s\n",
+				prefix,
+				ucv_uint64_get(ucv_object_get(entry, "id", NULL)),
+				ucv_uint64_get(ucv_object_get(entry, "pc", NULL)),
+				ucv_string_get(path));
+		else if (file)
+			ucv_stringbuf_printf(buf, "%sfunction %s (%s:%" PRId64 ":%" PRId64 ")\n",
+				prefix, fn, ucv_string_get(file),
+				ucv_int64_get(ucv_object_get(entry, "line", NULL)),
+				ucv_int64_get(ucv_object_get(entry, "byte", NULL)));
+		else
+			ucv_stringbuf_printf(buf, "%sfunction %s [C]\n", prefix, fn);
+
+		if (tco)
+			ucv_stringbuf_printf(buf, "  (%" PRId64 " tail call frames omitted)\n",
+				ucv_int64_get(tco));
+	}
+}
+
 static uc_value_t *
 uc_vm_get_error_context(uc_vm_t *vm)
 {
@@ -756,7 +807,10 @@ uc_vm_get_error_context(uc_vm_t *vm)
 	byte = offset;
 	line = uc_source_get_line(uc_program_function_source(frame->closure->function), &byte);
 
-	if (line) {
+	if (!chunk->debuginfo.offsets.count && frame->ip != chunk->entries) {
+		uc_vm_stacktrace_format_positions(buf, stacktrace);
+	}
+	else if (line) {
 		/* underline the statement the failing instruction belongs to, where one
 		 * can be resolved, rather than only marking that instruction */
 		uc_program_function_stmt_bounds(frame->closure->function, insn, &startoff, &endoff);
@@ -2446,16 +2500,26 @@ uc_value_t *
 uc_vm_import_namespace(uc_vm_t *vm, size_t from, const uint32_t *names, size_t nnames)
 {
 	uc_program_t *prog = uc_vm_current_program(vm);
-	uc_modexports_t *exports = uc_vm_run_exports(prog, uc_vector_last(&prog->runs), false);
-	size_t count = exports ? exports->count : 0;
+	uc_program_run_t *run = uc_vector_last(&prog->runs);
+	uc_export_instance_t *instance =
+		run ? uc_program_instance_get(prog, run->closure, false) : NULL;
+	uc_modexports_t *exports = instance ? &instance->exports : NULL;
+	size_t count = exports ? exports->count : 0, first = from, i;
 	uc_value_t *name, *modobj;
-	size_t i;
+	bool complete = true;
+
+	if (instance)
+		uc_vector_foreach(&instance->namespaces, ns)
+			if (ns->from == first && ns->count == nnames)
+				return ucv_get(ns->object);
 
 	modobj = ucv_object_new(vm);
 
 	for (i = 0; i < nnames; i++, from++) {
-		if (from >= count || !exports->entries[from])
+		if (from >= count || !exports->entries[from]) {
+			complete = false;
 			continue;
+		}
 
 		name = uc_program_get_constant(prog, names[i]);
 
@@ -2467,6 +2531,14 @@ uc_vm_import_namespace(uc_vm_t *vm, size_t from, const uint32_t *names, size_t n
 	}
 
 	ucv_set_constant(modobj, true);
+
+	/* The exports are references to the variables of the module, so all
+	 * wildcard imports of the module can share one object. An export that is
+	 * missing yet, e.g. in a module still in progress, can appear later. */
+	if (instance && complete)
+		uc_vector_push(&instance->namespaces, {
+			.from = first, .count = nnames, .object = ucv_get(modobj)
+		});
 
 	return modobj;
 }
@@ -2513,15 +2585,33 @@ uc_vm_dynload_module(uc_vm_t *vm, uc_value_t *name)
 	return modscope;
 }
 
+/* All wildcard imports of a module scope share one copy. The registry entry
+ * holds the scope beside the copy, so that the address in the key stays in
+ * use while the entry exists. A change to the scope after the first import
+ * does not show in the copy. */
 uc_value_t *
 uc_vm_dynload_namespace(uc_vm_t *vm, uc_value_t *modscope)
 {
-	uc_value_t *modobj = ucv_object_new(vm);
+	uc_value_t *modobj, *entry;
+	char key[sizeof("namespace.") + 2 * sizeof(void *) + 2];
+
+	snprintf(key, sizeof(key), "namespace.%p", (void *)modscope);
+	entry = uc_vm_registry_get(vm, key);
+
+	if (entry)
+		return ucv_get(ucv_array_get(entry, 1));
+
+	modobj = ucv_object_new(vm);
 
 	ucv_object_foreach_entry(modscope, e)
 		ucv_object_insert_string(modobj, e->key, ucv_get(e->value));
 
 	ucv_set_constant(modobj, true);
+
+	entry = ucv_array_new_length(vm, 2);
+	ucv_array_push(entry, ucv_get(modscope));
+	ucv_array_push(entry, ucv_get(modobj));
+	uc_vm_registry_set(vm, key, entry);
 
 	return modobj;
 }

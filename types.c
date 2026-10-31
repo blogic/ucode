@@ -234,6 +234,9 @@ ucv_gc_mark(uc_value_t *uv)
 		for (i = 0; instance && i < instance->exports.count; i++)
 			ucv_gc_mark(&instance->exports.entries[i]->header);
 
+		for (i = 0; instance && i < instance->namespaces.count; i++)
+			ucv_gc_mark(instance->namespaces.entries[i].object);
+
 		ucv_gc_mark(&function->program->header);
 
 		break;
@@ -282,6 +285,7 @@ void
 uc_program_instance_free(uc_program_t *program, uc_closure_t *closure, bool retain)
 {
 	uc_export_instance_t *instance = uc_program_instance_get(program, closure, false);
+	uc_namespaces_t namespaces;
 	uc_modexports_t exports;
 	size_t i;
 
@@ -290,11 +294,16 @@ uc_program_instance_free(uc_program_t *program, uc_closure_t *closure, bool reta
 
 	/* the release of an export can free another closure of the program */
 	exports = instance->exports;
+	namespaces = instance->namespaces;
 	*instance = program->instances.entries[--program->instances.count];
+
+	for (i = 0; i < namespaces.count; i++)
+		ucv_put_value(namespaces.entries[i].object, retain);
 
 	for (i = 0; i < exports.count; i++)
 		ucv_put_value(&exports.entries[i]->header, retain);
 
+	uc_vector_clear(&namespaces);
 	uc_vector_clear(&exports);
 }
 
@@ -407,6 +416,12 @@ ucv_free(uc_value_t *uv, bool retain)
 			uc_program_function_free(func);
 
 		uc_vallist_free(&program->constants);
+
+		for (i = 0; i < program->constant_values.count; i++)
+			ucv_put(program->constant_values.entries[i]);
+
+		uc_vector_clear(&program->constant_values);
+		uc_vector_clear(&program->constant_hashes);
 
 		for (i = 0; i < program->sources.count; i++)
 			ucv_put_value(&program->sources.entries[i]->header, retain);
@@ -797,12 +812,8 @@ ucv_int64_get(uc_value_t *uv)
 
 	errno = 0;
 
-	if ((pv & 3) == UC_INTEGER) {
-		if (((pv >> 2) & 1) == 0)
-			return (int64_t)(pv >> 3);
-
-		return -(int64_t)(pv >> 3);
-	}
+	if ((pv & 3) == UC_INTEGER)
+		return ucv_small_integer_get(uv);
 
 	switch (ucv_type(uv)) {
 	case UC_INTEGER:
@@ -1212,8 +1223,11 @@ ucv_object_key_match(uc_object_entry_t *e, const char *s, size_t len, uc_value_t
 	return klen == len && !memcmp(k, s, len);
 }
 
+/* Finds the key `s` of `len` bytes, whose hash is `*hash` if `hash` is
+ * given; only objects with an index need the hash. */
 static uc_object_entry_t *
-ucv_object_find(uc_object_t *object, const char *s, size_t len, uc_value_t *kv)
+ucv_object_find_hashed(uc_object_t *object, const char *s, size_t len, uc_value_t *kv,
+                       const uint64_t *hash)
 {
 	uint32_t i, n;
 
@@ -1225,13 +1239,25 @@ ucv_object_find(uc_object_t *object, const char *s, size_t len, uc_value_t *kv)
 		return NULL;
 	}
 
-	for (i = ucv_object_hash_bytes(s, len) & object->mask;
+	for (i = (hash ? *hash : ucv_object_hash_bytes(s, len)) & object->mask;
 	     (n = object->index[i]) != 0;
 	     i = (i + 1) & object->mask)
 		if (ucv_object_key_match(&object->entries[n - 1], s, len, kv))
 			return &object->entries[n - 1];
 
 	return NULL;
+}
+
+static uc_object_entry_t *
+ucv_object_find(uc_object_t *object, const char *s, size_t len, uc_value_t *kv)
+{
+	return ucv_object_find_hashed(object, s, len, kv, NULL);
+}
+
+uint64_t
+ucv_object_key_hash(uc_value_t *key)
+{
+	return ucv_object_hash_bytes(_ucv_string_get(&key), ucv_string_length(key));
 }
 
 static void
@@ -3150,6 +3176,26 @@ ucv_array_set_key(uc_value_t *arr, uc_value_t *key, uc_value_t *val)
 	ucv_put(val);
 
 	return false;
+}
+
+bool
+ucv_key_get_hashed(uc_vm_t *vm, uc_value_t *obj, uc_value_t *key, uint64_t hash,
+                   uc_value_t **res)
+{
+	uc_object_entry_t *e;
+
+	if (ucv_type(obj) != UC_OBJECT)
+		return false;
+
+	e = ucv_object_find_hashed(ucv_as_object(obj), _ucv_string_get(&key),
+	                           ucv_string_length(key), key, &hash);
+
+	if (!e)
+		return false;
+
+	*res = ucv_key_resolve_upval(vm, e->value);
+
+	return true;
 }
 
 uc_value_t *
