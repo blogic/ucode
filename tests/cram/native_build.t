@@ -148,3 +148,141 @@ interpreter library:
   $ ./nostub --ucode-search-path "$BUILD_BIN_DIR/*.so"
   libucode.so.[0-9]+ not found, bindings that depend on it load the interpreter library (re)
   1 false
+
+the dynlink flag defers imports to the run time as in the interpreter; the
+program embeds the modules and runs without their source files. dyn()
+compares the output with that of the interpreter, which runs bytecode with
+the same flag, as the interpreter runs no source with it:
+
+  $ dyn() {
+  >   flags=; for n in $1; do flags="$flags,dynlink=$n"; done
+  >   native ./native "$flags" -L "$PWD/*.uc" main.uc &&
+  >   if [ -f loader.uc ]; then
+  >     "$BUILD_BIN_DIR/ucode" -L "$PWD/*.uc" -c,no-interp$flags -o loader.ucb loader.uc &&
+  >     mv loader.ucb loader.uc
+  >   fi &&
+  >   "$BUILD_BIN_DIR/ucode" -L "$PWD/*.uc" -c,no-interp$flags -o ref.ucb main.uc &&
+  >   "$BUILD_BIN_DIR/ucode" -L "$PWD/*.uc" ref.ucb > ref.out &&
+  >   mkdir hidden && mv *.uc hidden/ &&
+  >   ./native --ucode-search-path "$PWD/*.uc" > native.out &&
+  >   cmp ref.out native.out && cat native.out && echo
+  > }
+  $ loader='import * as ns from "dep";return ns;'
+
+named imports are live:
+
+  $ mkdir dyn1 && cd dyn1
+  $ printf '%s' 'import {n,inc} from "dep";print(n," ",inc()," ",n);' > main.uc
+  $ printf '%s' 'export let n=1;export function inc(){gc();return ++n;}' > dep.uc
+  $ dyn dep
+  1 2 2
+  $ cd ..
+
+a default, a namespace and a static import of the module:
+
+  $ mkdir dyn2 && cd dyn2
+  $ printf '%s' 'import d,* as ns from "dep";print(d(),ns.n," ",ns.inc()," ",ns.n);' > main.uc
+  $ printf '%s' 'import {x} from "./base.uc";export let n=x;export function inc(){gc();return ++n;}export default ()=>n;' > dep.uc
+  $ printf '%s' 'export let x=10;' > base.uc
+  $ dyn dep
+  1010 11 11
+  $ cd ..
+
+require() after and before an import of the same module:
+
+  $ mkdir dyn3 && cd dyn3
+  $ printf '%s' 'import * as x from "dep";print(require("dep").n," ",x.n);' > main.uc
+  $ printf '%s' 'export let n=42;' > dep.uc
+  $ dyn dep
+  42 42
+  $ cd ..
+  $ mkdir dyn4 && cd dyn4
+  $ printf '%s' 'let x=require("dep");import {value} from "dep";print(value," ",x.value);' > main.uc
+  $ printf '%s' 'print("once ");return {value:7};' > dep.uc
+  $ dyn dep
+  once 7 7
+  $ cd ..
+  $ mkdir dyn5 && cd dyn5
+  $ printf '%s' 'import * as x from "dep";print(x," ",require("dep"));' > main.uc
+  $ printf '%s' 'print("once ");let value=7;' > dep.uc
+  $ dyn dep
+  once { } { }
+  $ cd ..
+  $ mkdir dyn6 && cd dyn6
+  $ printf '%s' 'import * as x from "dep"; print(x);' > main.uc
+  $ printf '%s' 'let value=1;' > dep.uc
+  $ dyn dep
+  { }
+  $ cd ..
+
+a reload keeps the cells of the first load, and a failed load is not cached:
+
+  $ mkdir dyn7 && cd dyn7
+  $ printf '%s' 'let a=require("loader");delete modules.loader;delete modules.dep;let b=require("loader");gc();print(a.inc()," ",a.n," ",b.n," ",b.inc());' > main.uc
+  $ printf '%s' "$loader" > loader.uc
+  $ printf '%s' 'export let n=0;export function inc(){gc();return ++n;}' > dep.uc
+  $ dyn dep
+  1 1 0 1
+  $ cd ..
+  $ mkdir dyn8 && cd dyn8
+  $ printf '%s' 'global.tries=0;try{require("loader");}catch(e){print(e.message," ");}print(exists(modules,"dep")," ",require("loader").n);' > main.uc
+  $ printf '%s' "$loader" > loader.uc
+  $ printf '%s' 'if(++tries==1)die("retry");export let n=tries;' > dep.uc
+  $ dyn dep
+  retry false 2
+  $ cd ..
+
+a namespace is read only, and a module in the registry is not loaded:
+
+  $ mkdir dyn9 && cd dyn9
+  $ printf '%s' 'import * as ns from "dep";try{ns.n=4;}catch(e){print(e.type);}print(ns.n);' > main.uc
+  $ printf '%s' 'export let n=3;' > dep.uc
+  $ dyn dep
+  Type error3
+  $ cd ..
+  $ mkdir dyn10 && cd dyn10
+  $ printf '%s' 'modules.dep={n:8};import {n} from "dep";print(n);' > main.uc
+  $ printf '%s' 'die("must not execute");export let n=0;' > dep.uc
+  $ dyn dep
+  8
+  $ cd ..
+
+a deferred module can defer an import of its own:
+
+  $ mkdir dyn11 && cd dyn11
+  $ printf '%s' 'import {sum} from "dep";print(sum());' > main.uc
+  $ printf '%s' 'import {n,inc} from "other";export function sum(){return inc()+n;}' > dep.uc
+  $ printf '%s' 'export let n=10;export function inc(){gc();return ++n;}' > other.uc
+  $ dyn "dep other"
+  22
+  $ cd ..
+
+errors of deferred imports:
+
+  $ mkdir dyn12 && cd dyn12
+  $ printf '%s' 'try{require("loader");}catch(e){print(e.type);}print(exists(modules,"dep"));' > main.uc
+  $ printf '%s' "$loader" > loader.uc
+  $ printf '%s' 'return {value:7};' > dep.uc
+  $ dyn dep
+  Runtime errorfalse
+  $ cd ..
+  $ mkdir dyn13 && cd dyn13
+  $ printf '%s' 'try{require("loader");}catch(e){print(e.type);}' > main.uc
+  $ printf '%s' 'import {missing} from "dep";return missing;' > loader.uc
+  $ printf '%s' 'export let n=1;' > dep.uc
+  $ dyn dep
+  Reference error
+  $ cd ..
+  $ mkdir dyn14 && cd dyn14
+  $ printf '%s' 'try{require("dep");}catch(e){print(e.type);}import {n} from "dep";print(n);' > main.uc
+  $ printf '%s' 'export let n=42;' > dep.uc
+  $ dyn dep
+  Runtime error42
+  $ cd ..
+  $ mkdir dyn15 && cd dyn15
+  $ printf '%s' 'try{require("dep");}catch(e){print(e.type);}print(require("loader").n);' > main.uc
+  $ printf '%s' "$loader" > loader.uc
+  $ printf '%s' 'export let n=42;' > dep.uc
+  $ dyn dep
+  Runtime error42
+  $ cd ..
