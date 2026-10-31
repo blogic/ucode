@@ -5055,24 +5055,6 @@ uc_compile_from_source(uc_parse_config_t *config, uc_source_t *source, uc_progra
 #endif
 }
 
-static uc_program_t *
-uc_compile_from_bytecode(uc_parse_config_t *config, uc_source_t *source, char **errp)
-{
-	uc_program_t *prog;
-
-	prog = uc_program_load(source, errp);
-
-	if (prog && !uc_program_entry(prog)) {
-		if (errp)
-			xasprintf(errp, "Program file contains no entry function\n");
-
-		ucv_put(&prog->header);
-		prog = NULL;
-	}
-
-	return prog;
-}
-
 uc_program_t *
 uc_compile(uc_parse_config_t *config, uc_source_t *source, char **errp)
 {
@@ -5087,7 +5069,7 @@ uc_compile(uc_parse_config_t *config, uc_source_t *source, char **errp)
 		break;
 
 	case UC_SOURCE_TYPE_PRECOMPILED:
-		prog = uc_compile_from_bytecode(config, source, errp);
+		prog = uc_program_load_entry(source, errp);
 		break;
 
 	case UC_SOURCE_TYPE_UNAVAILABLE:

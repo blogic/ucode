@@ -1,33 +1,9 @@
 # Test cases that native programs cannot pass, read through UCODE_TEST_SKIP
 # by the custom-native test. Format: category/test case-number reason
 
-00_syntax/30_call_error_callee 3 compiles source at runtime with loadstring()
-03_stdlib/36_render 6 compiles source at runtime with loadstring()
 03_stdlib/39_trace 1 expects the instruction trace of the interpreter
-03_stdlib/40_proto 8 loads the debug module, which needs vm.c
-03_stdlib/40_proto 9 loads the debug module, which needs vm.c
-03_stdlib/61_loadstring 1 compiles source at runtime with loadstring()
-03_stdlib/61_loadstring 2 compiles source at runtime with loadstring()
-03_stdlib/61_loadstring 3 compiles source at runtime with loadstring()
-03_stdlib/61_loadstring 4 compiles source at runtime with loadstring()
-03_stdlib/61_loadstring 5 compiles source at runtime with loadstring()
-03_stdlib/61_loadstring 6 compiles source at runtime with loadstring()
-03_stdlib/61_loadstring 7 compiles source at runtime with loadstring()
-03_stdlib/62_loadfile 1 compiles source at runtime with loadfile()
-03_stdlib/62_loadfile 2 compiles source at runtime with loadfile()
-03_stdlib/62_loadfile 3 compiles source at runtime with loadfile()
-03_stdlib/62_loadfile 4 compiles source at runtime with loadfile()
-03_stdlib/62_loadfile 5 compiles source at runtime with loadfile()
-03_stdlib/62_loadfile 6 compiles source at runtime with loadfile()
 03_stdlib/62_loadfile 7 runs /proc/self/exe as the ucode CLI
-04_modules/19_dynamic_import_module_exception 1 compiles source at runtime with loadstring()
-04_modules/19_source_file_closed 1 compiles source at runtime with loadfile()
-04_modules/20_dynamic_import_srcpos 1 compiles source at runtime with loadstring()
 04_modules/20_repeated_source_compile 1 runs /proc/self/exe as the ucode CLI
-04_modules/21_changed_source_compile 1 compiles source at runtime with loadfile()
-04_modules/21_dynamic_import_callframe_realloc 1 compiles source at runtime with loadstring()
 04_modules/22_unseekable_source_compile 1 runs /proc/self/exe as the ucode CLI
-04_modules/23_dynamic_import_failed 1 compiles source at runtime with loadstring()
-04_modules/24_load_in_module_body 1 compiles source at runtime with loadfile()
 04_modules/26_export_lifetime 1 runs /proc/self/exe as the ucode CLI
 04_modules/27_precompiled_module_exports 1 runs /proc/self/exe as the ucode CLI

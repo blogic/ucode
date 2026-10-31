@@ -2716,7 +2716,7 @@ uc_vm_call_args_adjust(uc_vm_t *vm, uc_function_t *function, size_t nargs)
 	}
 }
 
-static void
+void
 uc_vm_closure_call(uc_vm_t *vm, uc_closure_t *closure, uc_value_t *ctx,
                    bool mcall, size_t nargs, size_t stackoff)
 {

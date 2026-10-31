@@ -173,4 +173,10 @@ __hidden bool uc_vm_call_depth_check(uc_vm_t *vm, bool tail);
 __hidden bool uc_vm_call_dispatch(uc_vm_t *vm, uc_value_t **ctx, uc_value_t **fno, bool mcall, size_t nargs);
 __hidden void uc_vm_call_args_adjust(uc_vm_t *vm, uc_function_t *function, size_t nargs);
 
+/* Runs the closure that uc_vm_call_dispatch() returned, with its arguments
+ * on the stack above `stackoff`; takes the references to `ctx` and to the
+ * closure */
+__hidden void uc_vm_closure_call(uc_vm_t *vm, uc_closure_t *closure, uc_value_t *ctx,
+                                 bool mcall, size_t nargs, size_t stackoff);
+
 #endif /* UCODE_INTERNAL_VMCORE_H */

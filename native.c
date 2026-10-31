@@ -21,6 +21,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <spawn.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
 
 #include "ucode/internal/native.h"
 #include "ucode/internal/program.h"
@@ -672,6 +678,240 @@ uc_native_bundle_files(uc_vm_t *vm, size_t nargs)
 	return list;
 }
 
+uc_declare_vector(uc_native_argv_t, char *);
+
+static const char *uc_native_compiler = "ucode";
+
+/* Reads the output and the errors of the compiler until it closes both, as
+ * it can fill either pipe while the other one is read */
+static void
+uc_native_compiler_read(int fds[2], uc_stringbuf_t *bufs[2])
+{
+	struct pollfd p[2] = { { .fd = fds[0], .events = POLLIN }, { .fd = fds[1], .events = POLLIN } };
+	char chunk[4096];
+	ssize_t n;
+
+	while (p[0].fd >= 0 || p[1].fd >= 0) {
+		n = poll(p, 2, -1);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+
+		if (n < 0)
+			return;
+
+		for (size_t i = 0; i < 2; i++) {
+			if (p[i].fd < 0 || !p[i].revents)
+				continue;
+
+			n = read(p[i].fd, chunk, sizeof(chunk));
+
+			if (n > 0)
+				uc_stringbuf_add(bufs[i], chunk, n);
+			else if (n == 0 || errno != EINTR)
+				p[i].fd = -1;
+		}
+	}
+}
+
+/* Runs the compiler with `argv` and `in`, if not -1, as its standard input,
+ * and returns its exit status, or -1 with errno set if it did not start */
+static int
+uc_native_compiler_run(char **argv, int in, uc_stringbuf_t *out, uc_stringbuf_t *err)
+{
+	uc_stringbuf_t *bufs[2] = { out, err };
+	posix_spawn_file_actions_t fa;
+	int po[2], pe[2], status = -1, rv;
+	pid_t pid;
+
+	if (pipe2(po, O_CLOEXEC))
+		return -1;
+
+	if (pipe2(pe, O_CLOEXEC)) {
+		close(po[0]);
+		close(po[1]);
+
+		return -1;
+	}
+
+	posix_spawn_file_actions_init(&fa);
+
+	if (in >= 0)
+		posix_spawn_file_actions_adddup2(&fa, in, STDIN_FILENO);
+
+	posix_spawn_file_actions_adddup2(&fa, po[1], STDOUT_FILENO);
+	posix_spawn_file_actions_adddup2(&fa, pe[1], STDERR_FILENO);
+	rv = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+	posix_spawn_file_actions_destroy(&fa);
+	close(po[1]);
+	close(pe[1]);
+
+	if (rv == 0) {
+		uc_native_compiler_read((int[]){ po[0], pe[0] }, bufs);
+
+		while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+			;
+	}
+
+	close(po[0]);
+	close(pe[0]);
+
+	if (rv) {
+		errno = rv;
+
+		return -1;
+	}
+
+	return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* The ucode CLI arguments that compile `input` as uc_compile() would with
+ * the settings of `config` */
+static void
+uc_native_compiler_args(uc_native_argv_t *args, uc_parse_config_t *config, const char *input)
+{
+	uc_stringbuf_t flags = { 0 };
+
+	uc_vector_push(args, xstrdup(uc_native_compiler));
+
+	uc_stringbuf_append(&flags, "-cno-interp");
+
+	if (config->compile_module)
+		uc_stringbuf_append(&flags, ",module");
+
+	uc_vector_foreach(&config->force_dynlink_list, name)
+		uc_stringbuf_printf(&flags, ",dynlink=%s", *name);
+
+	uc_vector_push(args, xstrdup(flags.buf));
+	uc_stringbuf_reset(&flags);
+
+	if (config->raw_mode) {
+		uc_vector_push(args, xstrdup("-R"));
+	}
+	else {
+		uc_stringbuf_printf(&flags, "-T%s%s%s", config->lstrip_blocks ? "" : "no-lstrip",
+		                    (!config->lstrip_blocks && !config->trim_blocks) ? "," : "",
+		                    config->trim_blocks ? "" : "no-rtrim");
+		uc_vector_push(args, xstrdup(flags.buf));
+	}
+
+	free(flags.buf);
+
+	if (config->strict_declarations)
+		uc_vector_push(args, xstrdup("-S"));
+
+	uc_vector_foreach(&config->module_search_path, pattern) {
+		uc_vector_push(args, xstrdup("-L"));
+		uc_vector_push(args, xstrdup(*pattern));
+	}
+
+	uc_vector_push(args, xstrdup("-o"));
+	uc_vector_push(args, xstrdup("-"));
+	uc_vector_push(args, xstrdup(input));
+	uc_vector_push(args, NULL);
+}
+
+/* A source string reaches the compiler as its standard input, which it names
+ * [stdin]; the program gets the name of the string back, so that its errors
+ * and traces read as in the interpreter. */
+static void
+uc_native_compiled_rename(uc_program_t *prog, uc_source_t *source, size_t len)
+{
+	uc_source_t *old, *new;
+
+	for (size_t i = 0; i < prog->sources.count; i++) {
+		old = prog->sources.entries[i];
+
+		if (strcmp(old->filename, "[stdin]"))
+			continue;
+
+		new = uc_source_new_buffer(source->filename, xalloc(len), len);
+		memcpy(new->buffer, source->buffer, len);
+		uc_source_runpath_set(new, old->runpath);
+		new->lineinfo = old->lineinfo;
+		memset(&old->lineinfo, 0, sizeof(old->lineinfo));
+
+		uc_source_put(old);
+		prog->sources.entries[i] = new;
+	}
+}
+
+/* Compiles a script that the program does not contain with the ucode CLI,
+ * which runs in its own process, and loads the bytecode that it writes, which
+ * the interpreter runs. */
+static uc_program_t *
+uc_native_compile(uc_parse_config_t *config, uc_source_t *source, char **errp)
+{
+	uc_stringbuf_t out = { 0 }, err = { 0 };
+	uc_native_argv_t args = { 0 };
+	uc_program_t *prog = NULL;
+	uc_source_t *bytecode;
+	size_t len = 0;
+	int in = -1, rv;
+
+	switch (uc_source_begin(source)) {
+	case UC_SOURCE_TYPE_PRECOMPILED:
+		return uc_program_load_entry(source, errp);
+
+	case UC_SOURCE_TYPE_UNAVAILABLE:
+		xasprintf(errp, "Unable to open source file %s: %s\n", source->filename, strerror(errno));
+
+		return NULL;
+
+	default:
+		break;
+	}
+
+	if (source->buffer) {
+		fseek(source->fp, 0, SEEK_END);
+		len = ftell(source->fp);
+		in = memfd_create("ucode-source", MFD_CLOEXEC);
+
+		if (in < 0 || write(in, source->buffer, len) != (ssize_t)len || lseek(in, 0, SEEK_SET)) {
+			xasprintf(errp, "Unable to pass the source to %s: %s\n", uc_native_compiler,
+			          strerror(errno));
+
+			if (in >= 0)
+				close(in);
+
+			return NULL;
+		}
+	}
+
+	uc_native_compiler_args(&args, config, source->buffer ? "-" : source->filename);
+	rv = uc_native_compiler_run(args.entries, in, &out, &err);
+
+	if (in >= 0)
+		close(in);
+
+	for (size_t i = 0; i < args.count; i++)
+		free(args.entries[i]);
+
+	uc_vector_clear(&args);
+
+	if (rv < 0) {
+		xasprintf(errp, "Unable to run %s: %s\n", uc_native_compiler, strerror(errno));
+	}
+	else if (rv > 0 || !out.buf) {
+		xasprintf(errp, "%s", err.buf ? err.buf : "Compilation failed\n");
+	}
+	else {
+		bytecode = uc_source_new_buffer(source->filename, out.buf, uc_stringbuf_length(&out));
+		out.buf = NULL;
+		uc_source_runpath_set(bytecode, source->runpath);
+		prog = uc_program_load_entry(bytecode, errp);
+		uc_source_put(bytecode);
+	}
+
+	if (prog && source->buffer)
+		uc_native_compiled_rename(prog, source, len);
+
+	free(out.buf);
+	free(err.buf);
+
+	return prog;
+}
+
 /* Native program options, accepted before the first program argument. They
  * use long names, so that the short options of the program itself pass
  * through to ARGV unchanged. */
@@ -685,6 +925,7 @@ static const struct {
 	{ "--ucode-library",     'l' },
 	{ "--ucode-search-path", 'L' },
 	{ "--ucode-gc",          'g' },
+	{ "--ucode-compiler",    'C' },
 };
 
 static char
@@ -730,6 +971,10 @@ uc_native_options_apply(uc_vm_t *vm, int argc, char **argv, uc_value_t *args)
 
 		case 'g':
 			vm->gc_interval = atoi(argv[i + 1]);
+			break;
+
+		case 'C':
+			uc_native_compiler = argv[i + 1];
 			break;
 		}
 	}
@@ -817,7 +1062,11 @@ uc_native_abi_load(void)
 int
 uc_native_main(int argc, char **argv, const uc_native_program_t *np)
 {
+	/* the settings of the ucode CLI, which apply to the scripts that the
+	 * program compiles at runtime */
 	uc_parse_config_t config = {
+		.lstrip_blocks = true,
+		.trim_blocks = true,
 		.raw_mode = !(np->units[0].flags & UC_NATIVE_UNIT_TEMPLATE),
 		.setup_signal_handlers = true
 	};
@@ -841,6 +1090,7 @@ uc_native_main(int argc, char **argv, const uc_native_program_t *np)
 	uc_native_running = np;
 	uc_vm_native_call_set(uc_native_vm_call);
 	uc_loader_units_set(&uc_native_loader_units);
+	uc_loader_compile_set(uc_native_compile);
 
 	/* the search path is part of the configuration the VM starts with; as in
 	 * the CLI, the given entries come before the default ones */

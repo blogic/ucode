@@ -32,6 +32,10 @@ quote() {
 add_compile() { compile_args="$compile_args $(quote "$1")"; }
 add_run() { run_args="$run_args $(quote "$1")"; }
 
+# scripts that the program does not contain are compiled by the CLI of the
+# build, not by one that PATH may find
+add_run --ucode-compiler; add_run "$ucode"
+
 # Modes that do not run a program, or that native programs do not provide,
 # are left to the interpreter.
 for arg in "$@"; do

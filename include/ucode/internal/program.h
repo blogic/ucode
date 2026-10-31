@@ -54,6 +54,9 @@ uc_program_require_version(uc_program_t *prog, uint8_t version)
 
 __hidden uc_function_t *uc_program_entry(uc_program_t *);
 
+/* uc_program_load() of a program, which fails if it has no entry function */
+__hidden uc_program_t *uc_program_load_entry(uc_source_t *source, char **errp);
+
 /* prefix of the registry keys under which a VM holds the closures that
  * uc_vm_execute() runs; the address of the program follows */
 #define UC_PROGRAM_MAIN_KEY "vm.main."

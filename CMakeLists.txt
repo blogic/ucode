@@ -318,8 +318,10 @@ if(LLVM_SUPPORT AND NOT UCODE_WASM)
 
   set(native_bc_files)
 
+  # vm.c and bytecode.c run the scripts that a native program does not contain,
+  # which the ucode CLI compiles when the program loads them
   foreach(src lib.c vmcore.c chunk.c vallist.c source.c types.c json.c program.c platform.c
-              cli.c native.c native_insn.c lexer.c)
+              cli.c native.c native_insn.c lexer.c vm.c bytecode.c)
     get_filename_component(name ${src} NAME_WE)
     set(bc ${CMAKE_BINARY_DIR}/native-bc/${name}.bc)
 

@@ -882,6 +882,7 @@ uc_native_call_stack(uc_vm_t *vm, uc_native_frame_t *f, uc_value_t *ctx, bool mc
 	uc_value_t *fno = ucv_get(vm->stack.entries[stackoff]);
 	uc_closure_t *closure;
 	uc_value_t **args;
+	bool bytecode;
 
 	*res = NULL;
 
@@ -899,9 +900,16 @@ uc_native_call_stack(uc_vm_t *vm, uc_native_frame_t *f, uc_value_t *ctx, bool mc
 		return false;
 	}
 
-	/* a C function ran, and its frame pop left the result in place of the
-	 * callee and the receiver */
-	if (!fno) {
+	closure = fno ? ucv_as_closure(fno) : NULL;
+	bytecode = closure && !closure->function->native;
+
+	/* the interpreter, if the program links it, runs a bytecode closure on
+	 * the stack, and its frame pop leaves the result in place of the callee
+	 * and the receiver, as a C function that already ran does */
+	if (bytecode)
+		uc_vm_closure_call(vm, closure, ctx, mcall, nargs, stackoff);
+
+	if (!closure || bytecode) {
 		if (vm->stack.count > base)
 			*res = uc_vm_stack_pop(vm);
 
@@ -910,23 +918,8 @@ uc_native_call_stack(uc_vm_t *vm, uc_native_frame_t *f, uc_value_t *ctx, bool mc
 		return uc_native_ok(vm);
 	}
 
-	closure = ucv_as_closure(fno);
 	args = uc_native_stack_args(vm, nargs);
 	uc_native_stack_unwind(vm, base);
-
-	if (!closure->function->native) {
-		uc_vm_raise_exception(vm, EXCEPTION_RUNTIME,
-		                      "bytecode closures cannot execute in the native runtime");
-		ucv_put(ctx);
-		ucv_put(fno);
-
-		for (size_t i = 0; i < nargs; i++)
-			ucv_put(args[i]);
-
-		free(args);
-
-		return false;
-	}
 
 	if (tail) {
 		f->tail.fn = fno;

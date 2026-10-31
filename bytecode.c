@@ -888,3 +888,21 @@ out:
 
 	return NULL;
 }
+
+uc_program_t *
+uc_program_load_entry(uc_source_t *source, char **errp)
+{
+	uc_program_t *prog;
+
+	prog = uc_program_load(source, errp);
+
+	if (prog && !uc_program_entry(prog)) {
+		if (errp)
+			xasprintf(errp, "Program file contains no entry function\n");
+
+		ucv_put(&prog->header);
+		prog = NULL;
+	}
+
+	return prog;
+}

@@ -260,6 +260,14 @@ uc_vm_call_function(uc_vm_t *vm, uc_value_t *ctx, uc_value_t *fno, bool mcall,
 
 	closure = ucv_as_closure(fno);
 
+	/* a native closure runs at once and leaves its result on the stack, as a
+	 * C function does, also in a tail call, which a RETURN follows */
+	if (closure->function->native) {
+		uc_vm_closure_call(vm, closure, ctx, mcall, nargs, stackoff);
+
+		return true;
+	}
+
 	uc_vm_call_args_adjust(vm, closure->function, nargs);
 
 	/* tail call: reuse the current call frame instead of pushing a new one. The

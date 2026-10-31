@@ -32,9 +32,10 @@ a native program behaves as the interpreter, also when it fails:
   610 [ "-D", "x" ] 42
   [254]
 
-it contains neither the interpreter, the compiler nor the bytecode loader:
+it contains the interpreter and the bytecode loader for the scripts that it
+does not contain, but not the compiler:
 
-  $ nm hello | grep -E ' (uc_vm_execute|uc_vm_execute_chunk|uc_compile_from_source|uc_lexer_init|uc_program_load)$'
+  $ nm hello | grep -E ' (uc_compile_from_source|uc_lexer_init)$'
   [1]
 
 without the debug flag, a native program carries no debug information and
@@ -111,7 +112,8 @@ the path the program loads them by:
   helper
 
 a script that fails to compile fails to load as in the interpreter, and
-source code compiled at runtime is not supported:
+source code that the program compiles at runtime is compiled by the ucode
+CLI, which PATH finds, and runs in the interpreter:
 
   $ echo 'let = 1;' > broken.uc
   $ echo 'try { include("broken.uc"); } catch (e) { print(e.message, "\n"); }' > load.uc
@@ -126,11 +128,23 @@ source code compiled at runtime is not supported:
   
   $ echo 'print(loadstring("return 6 * 7;")(), "\n");' > dynamic.uc
   $ native dynamic "" dynamic.uc && ./dynamic
-  Runtime error: Unable to compile source string:
-  
-    | Source code compilation not supported
-  
-  In function #1 at offset 19 of dynamic.uc
-  
-  
-  [254]
+  42
+
+a binding that depends on libucode gets the library in the native-abi
+directory, which the program finds through its RUNPATH and which contains
+no interpreter. Without it, the program warns, as the binding loads the
+interpreter library:
+
+  $ cat > binding.uc <<'EOF'
+  > require("debug");
+  > let maps = split(require("fs").readfile("/proc/self/maps"), "\n");
+  > let libs = uniq(map(filter(maps, l => index(l, "libucode.so") >= 0), l => match(l, /[^ ]*$/)[0]));
+  > print(length(libs), " ", index(libs[0], "/native-abi/") >= 0, "\n");
+  > EOF
+  $ native binding "" binding.uc
+  $ ./binding --ucode-search-path "$BUILD_BIN_DIR/*.so"
+  1 true
+  $ RUNPATH="$PWD/none" native nostub "" binding.uc
+  $ ./nostub --ucode-search-path "$BUILD_BIN_DIR/*.so"
+  libucode.so.[0-9]+ not found, bindings that depend on it load the interpreter library (re)
+  1 false
